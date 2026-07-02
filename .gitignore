@@ -1,0 +1,22 @@
+# ── SECRETS — never commit ──────────────────────────────────
+# config.py contains live Telegram bot token + Anthropic API key
+config.py
+# Archive contains old config.py copies with the same secrets
+Archive/
+
+# ── RUNTIME DATA (machine-local state, not code) ────────────
+*.log
+oracle_journal.json
+trade_history.json
+sage_reviews.json
+atlas_*.json
+backtest_master_*.csv
+backtest_master_*.json
+
+# ── PYTHON ──────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.venv/
+
+# ── MISC ────────────────────────────────────────────────────
+*.zip

@@ -1883,6 +1883,25 @@ if len(df_clean) > 0 and len(df_clean) < len(df):
     print(f"  vs v7 baseline:  RM+3863, DD 19.8%, Sharpe 2.27")
     print(f"  Assessment:      {flag}")
 
+# ── v13: MATRIX REPORT ───────────────────────────────────────
+# NOTE: mt5.shutdown() (line ~1009) happens mid-run, right after the
+# GVE/XAUUSD/XAGUSD section and before MRE/CBE/HPE execute — it is NOT
+# at the end of the script. ALL_TRADES is only fully populated here, at
+# the true end, after every engine has run. The matrix report is pure
+# Python over ALL_TRADES and needs no MT5 handle, so it is placed here
+# rather than "before mt5.shutdown()" as originally sketched.
+import os
+from matrix_report import build_matrix, write_report
+from datetime import date as _date
+os.makedirs("docs/reports", exist_ok=True)
+_rows = build_matrix([dict(engine=t["engine"], symbol=t["symbol"],
+                           variant=t.get("variant", "base"), pnl_rm=t["pnl_rm"])
+                      for t in ALL_TRADES])
+_md_path = f"docs/reports/v13_matrix_{_date.today()}.md"
+_csv_path = f"docs/reports/v13_matrix_{_date.today()}.csv"
+write_report(_rows, _md_path, _csv_path)
+print(f"  Matrix report: {_md_path}")
+
 df.to_csv("backtest_master_v10.csv",index=False)
 with open("backtest_master_v10.json","w") as f:
     json.dump(ALL_TRADES,f,indent=2,default=str)

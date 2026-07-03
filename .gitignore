@@ -12,6 +12,8 @@ sage_reviews.json
 atlas_*.json
 backtest_master_*.csv
 backtest_master_*.json
+# matrix report: .md is committed each run, raw .csv stays local
+docs/reports/*.csv
 
 # ── PYTHON ──────────────────────────────────────────────────
 __pycache__/

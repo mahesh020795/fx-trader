@@ -194,10 +194,26 @@ CTE_PROFILES = {
                    s_start=SESSION_START_UTC, s_end=SESSION_END_UTC,
                    atr_thresh=ATR_REGIME_THRESH, block_london=False, label="JPY-Cross",
                    block_sessions=["Other"]),
-    # XAGUSD CTE: 34 signals, PF 1.08, MaxDD 42.3% — marginal, DD too high for live
-    # Root cause: pip_val_rm oversized relative to Silver price — needs recalibration
-    # SUSPENDED from live trading. Left in profiles for future calibration run.
-    # "XAGUSD": dict(pip=0.001, ...)  ← re-enable after pip_val fix
+    # v13: XAGUSD recalibration — pip_val from verified MT5 contract data.
+    # MT5 probe (mt5.symbol_info('XAGUSD')): trade_contract_size=5000.0,
+    # trade_tick_value=0.5, trade_tick_size=0.001. Naive estimate from contract
+    # size alone (5000oz * 0.001 * 0.01 lot * 3.98) = RM0.199/pip — but that
+    # implies tick_value should be 5000*0.001=5.0 USD/lot/tick, while the
+    # broker's actual trade_tick_value is 0.5 USD/lot/tick (10x smaller). The
+    # broker's tick_value is authoritative (it's what the terminal actually
+    # applies to P&L), so pip_val_rm is derived from it instead:
+    #   usd_per_pip@0.01lot = tick_value * (pip/tick_size) * 0.01
+    #                        = 0.5 * (0.001/0.001) * 0.01 = 0.005 USD
+    #   pip_val_rm = 0.005 * 3.98 = RM0.0199  (vs naive RM0.199 — 90% disagreement,
+    #   far past the 20% threshold, so the derived value is used). This is the
+    #   same class of error that caused the v8 disaster (oversized pip_val); using
+    #   the naive 0.199 here would silently reproduce it at ~10x true risk.
+    "XAGUSD": dict(pip=0.001, pip_val_rm=0.0199, sl_min=SL_MIN_XAGUSD,  # CTE
+                   vp_prox_pct=0.5, vp_prox_fixed=None, vp_lookback=40,
+                   min_fvg=MIN_FVG_PIPS_XAGUSD, spread_rm=5.0*0.0199,
+                   s_start=SESSION_START_UTC, s_end=SESSION_END_UTC,
+                   atr_thresh=ATR_REGIME_THRESH, block_london=False, label="Silver",
+                   block_sessions=["Other"]),
 }
 # ── v13 CANDIDATE MODE ───────────────────────────────────────
 # Symbols under evaluation. NOT in the live whitelist — they scan in this
@@ -268,8 +284,12 @@ MRE_PROFILES = {
     "NZDJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
                    min_range=MRE_MIN_RANGE_JPY, extreme_prox=MRE_EXTREME_PROX_JPY,
                    sl_beyond=MRE_SL_BEYOND_JPY, spread_rm=2.0*0.091*USD_MYR_RATE*0.01),
-    # XAGUSD MRE: 0 signals — range detection parameters need Silver-specific tuning
-    # "XAGUSD": dict(pip=0.001, ...)  ← re-enable after min_range calibration
+    # v13: XAGUSD recalibration — min_range=75 (middle of documented 50-100 pip
+    # band; v8 used 500, which was the root cause of 0 signals). pip_val_rm
+    # verified against MT5 contract (see CTE entry above for derivation).
+    "XAGUSD": dict(pip=0.001, pip_val_rm=0.0199,
+                   min_range=75, extreme_prox=MRE_EXTREME_PROX_JPY,
+                   sl_beyond=MRE_SL_BEYOND_JPY, spread_rm=5.0*0.0199),
 }
 MRE_SYMS = [s for s in MRE_PROFILES.keys() if v13_allowed("MRE", s)]
 
@@ -338,8 +358,11 @@ HPE_PROFILES = {
                    prox=120, sl_buf=HPE_SL_BEYOND_JPY, spread_rm=2.0*0.091*USD_MYR_RATE*0.01),
     "NZDJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
                    prox=120, sl_buf=HPE_SL_BEYOND_JPY, spread_rm=2.0*0.091*USD_MYR_RATE*0.01),
-    # XAGUSD HPE: 0 signals — D1 pivot proximity too tight for Silver price scale
-    # "XAGUSD": dict(pip=0.001, ...)  ← re-enable after prox/sl_buf calibration
+    # v13: XAGUSD recalibration — prox=300, sl_buf=50 (Silver price scale ~30.00,
+    # v8's tight pivot proximity caused 0 signals). pip_val_rm verified against
+    # MT5 contract (see CTE entry above for derivation).
+    "XAGUSD": dict(pip=0.001, pip_val_rm=0.0199,
+                   prox=300, sl_buf=50, spread_rm=5.0*0.0199),
 }
 HPE_SYMS = [s for s in HPE_PROFILES.keys() if v13_allowed("HPE", s)]
 
@@ -396,8 +419,10 @@ for sym in ALL_SYMBOLS:
     h1=fetch(sym,TF_H1,25000); w1=fetch(sym,TF_W1,260)
     entry = {"D1":d1,"H4":h4,"H1":h1,"W1":w1}
     if sym in (GVE_SYMBOL, SILVER_SYMBOL):
-        # GVE needs full history; Silver uses 3000-candle window (v8 fix for 1-signal issue)
-        m15_count = 99999 if sym == GVE_SYMBOL else 3000
+        # v13: Silver GVE now uses the full ~99,999-candle M15 window, matching
+        # GVE_SYMBOL. v8 used a 3000-candle window which produced 0 signals —
+        # documented fix per task-5 brief (GVE needs the full M15 history).
+        m15_count = 99999
         m15=fetch(sym,TF_M15,m15_count)
         entry["M15"] = m15
     else:

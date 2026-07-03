@@ -261,6 +261,18 @@ HPE_PROFILES = {
 HPE_SYMS = [s for s in HPE_PROFILES.keys()
             if s != "XAGUSD" and engine_symbol_allowed("HPE", s)]
 
+# ── v13: PROFILE SANITY GATE ─────────────────────────────────
+from profile_sanity import check_profile
+_sanity_violations = []
+for _name, _profiles in [("CTE", CTE_PROFILES), ("MRE", MRE_PROFILES),
+                         ("CBE", CBE_PROFILES), ("HPE", HPE_PROFILES)]:
+    for _sym, _prof in _profiles.items():
+        for _v in check_profile(_sym, _prof):
+            _sanity_violations.append(f"[{_name}] {_v}")
+if _sanity_violations:
+    for _v in _sanity_violations: print("SANITY FAIL:", _v)
+    raise SystemExit("Profile sanity gate failed — fix profiles before running.")
+
 # ── Preload + Fetch ───────────────────────────────────────
 print("\nPreloading 3-year history...")
 def preload(sym, tfs):

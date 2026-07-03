@@ -161,6 +161,39 @@ CTE_PROFILES = {
                    s_start=SESSION_START_UTC, s_end=SESSION_END_UTC,
                    atr_thresh=ATR_REGIME_THRESH, block_london=False, label="JPY-Cross",
                    block_sessions=["Other"]),
+    # ── v13 CANDIDATES (spec 2026-07-03) ──
+    "USDCHF": dict(pip=0.0001, pip_val_rm=0.111*USD_MYR_RATE, sl_min=SL_MIN_FOREX,
+                   vp_prox_pct=None, vp_prox_fixed=VP_PROXIMITY_FOREX,
+                   vp_lookback=VP_LOOKBACK_DEFAULT, min_fvg=MIN_FVG_PIPS_FOREX,
+                   spread_rm=1.2*0.111*USD_MYR_RATE*0.01,
+                   s_start=SESSION_START_UTC, s_end=SESSION_END_UTC,
+                   atr_thresh=ATR_REGIME_THRESH, block_london=True, label="Forex",
+                   block_sessions=["NY_PM"]),
+    "EURGBP": dict(pip=0.0001, pip_val_rm=0.127*USD_MYR_RATE, sl_min=SL_MIN_FOREX,
+                   vp_prox_pct=None, vp_prox_fixed=VP_PROXIMITY_FOREX,
+                   vp_lookback=VP_LOOKBACK_DEFAULT, min_fvg=MIN_FVG_PIPS_FOREX,
+                   spread_rm=1.0*0.127*USD_MYR_RATE*0.01,
+                   s_start=SESSION_START_UTC, s_end=SESSION_END_UTC,
+                   atr_thresh=ATR_REGIME_THRESH, block_london=True, label="Forex",
+                   block_sessions=["NY_PM"]),
+    "AUDJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE, sl_min=120,
+                   vp_prox_pct=0.5, vp_prox_fixed=None, vp_lookback=40,
+                   min_fvg=20.0, spread_rm=1.8*0.091*USD_MYR_RATE*0.01,
+                   s_start=SESSION_START_UTC, s_end=SESSION_END_UTC,
+                   atr_thresh=ATR_REGIME_THRESH, block_london=False, label="JPY-Cross",
+                   block_sessions=["Other"]),
+    "CADJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE, sl_min=120,
+                   vp_prox_pct=0.5, vp_prox_fixed=None, vp_lookback=40,
+                   min_fvg=20.0, spread_rm=2.0*0.091*USD_MYR_RATE*0.01,
+                   s_start=SESSION_START_UTC, s_end=SESSION_END_UTC,
+                   atr_thresh=ATR_REGIME_THRESH, block_london=False, label="JPY-Cross",
+                   block_sessions=["Other"]),
+    "NZDJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE, sl_min=120,
+                   vp_prox_pct=0.5, vp_prox_fixed=None, vp_lookback=40,
+                   min_fvg=20.0, spread_rm=2.0*0.091*USD_MYR_RATE*0.01,
+                   s_start=SESSION_START_UTC, s_end=SESSION_END_UTC,
+                   atr_thresh=ATR_REGIME_THRESH, block_london=False, label="JPY-Cross",
+                   block_sessions=["Other"]),
     # XAGUSD CTE: 34 signals, PF 1.08, MaxDD 42.3% — marginal, DD too high for live
     # Root cause: pip_val_rm oversized relative to Silver price — needs recalibration
     # SUSPENDED from live trading. Left in profiles for future calibration run.
@@ -219,6 +252,22 @@ MRE_PROFILES = {
     "GBPJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
                    min_range=MRE_MIN_RANGE_JPY, extreme_prox=MRE_EXTREME_PROX_JPY,
                    sl_beyond=MRE_SL_BEYOND_JPY, spread_rm=2.5*0.091*USD_MYR_RATE*0.01),
+    # ── v13 CANDIDATES (spec 2026-07-03) ──
+    "USDCHF": dict(pip=0.0001, pip_val_rm=0.111*USD_MYR_RATE,
+                   min_range=MRE_MIN_RANGE_FOREX, extreme_prox=MRE_EXTREME_PROX_FOREX,
+                   sl_beyond=MRE_SL_BEYOND_PIPS, spread_rm=1.2*0.111*USD_MYR_RATE*0.01),
+    "EURGBP": dict(pip=0.0001, pip_val_rm=0.127*USD_MYR_RATE,
+                   min_range=MRE_MIN_RANGE_FOREX, extreme_prox=MRE_EXTREME_PROX_FOREX,
+                   sl_beyond=MRE_SL_BEYOND_PIPS, spread_rm=1.0*0.127*USD_MYR_RATE*0.01),
+    "AUDJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
+                   min_range=MRE_MIN_RANGE_JPY, extreme_prox=MRE_EXTREME_PROX_JPY,
+                   sl_beyond=MRE_SL_BEYOND_JPY, spread_rm=1.8*0.091*USD_MYR_RATE*0.01),
+    "CADJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
+                   min_range=MRE_MIN_RANGE_JPY, extreme_prox=MRE_EXTREME_PROX_JPY,
+                   sl_beyond=MRE_SL_BEYOND_JPY, spread_rm=2.0*0.091*USD_MYR_RATE*0.01),
+    "NZDJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
+                   min_range=MRE_MIN_RANGE_JPY, extreme_prox=MRE_EXTREME_PROX_JPY,
+                   sl_beyond=MRE_SL_BEYOND_JPY, spread_rm=2.0*0.091*USD_MYR_RATE*0.01),
     # XAGUSD MRE: 0 signals — range detection parameters need Silver-specific tuning
     # "XAGUSD": dict(pip=0.001, ...)  ← re-enable after min_range calibration
 }
@@ -242,6 +291,17 @@ CBE_PROFILES = {
                    min_range=CBE_MIN_RANGE_JPY, spread_rm=1.5*0.091*USD_MYR_RATE*0.01),
     "GBPJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
                    min_range=CBE_MIN_RANGE_JPY, spread_rm=2.5*0.091*USD_MYR_RATE*0.01),
+    # ── v13 CANDIDATES (spec 2026-07-03) ──
+    "USDCHF": dict(pip=0.0001, pip_val_rm=0.111*USD_MYR_RATE,
+                   min_range=CBE_MIN_RANGE_FOREX, spread_rm=1.2*0.111*USD_MYR_RATE*0.01),
+    "EURGBP": dict(pip=0.0001, pip_val_rm=0.127*USD_MYR_RATE,
+                   min_range=CBE_MIN_RANGE_FOREX, spread_rm=1.0*0.127*USD_MYR_RATE*0.01),
+    "AUDJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
+                   min_range=CBE_MIN_RANGE_JPY, spread_rm=1.8*0.091*USD_MYR_RATE*0.01),
+    "CADJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
+                   min_range=CBE_MIN_RANGE_JPY, spread_rm=2.0*0.091*USD_MYR_RATE*0.01),
+    "NZDJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
+                   min_range=CBE_MIN_RANGE_JPY, spread_rm=2.0*0.091*USD_MYR_RATE*0.01),
     # XAGUSD CBE: CATASTROPHIC — PF 0.28, -RM466, MaxDD 93.3%
     # CBE compression breakout logic fires on Silver volatility spikes, not real compressions
     # HARD BLOCKED from live trading until dedicated Silver CBE calibration
@@ -267,6 +327,17 @@ HPE_PROFILES = {
                    prox=120, sl_buf=HPE_SL_BEYOND_JPY, spread_rm=1.5*0.091*USD_MYR_RATE*0.01),
     "GBPJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
                    prox=150, sl_buf=HPE_SL_BEYOND_JPY*2, spread_rm=2.5*0.091*USD_MYR_RATE*0.01),
+    # ── v13 CANDIDATES (spec 2026-07-03) ──
+    "USDCHF": dict(pip=0.0001, pip_val_rm=0.111*USD_MYR_RATE,
+                   prox=50, sl_buf=HPE_SL_BEYOND_FOREX, spread_rm=1.2*0.111*USD_MYR_RATE*0.01),
+    "EURGBP": dict(pip=0.0001, pip_val_rm=0.127*USD_MYR_RATE,
+                   prox=50, sl_buf=HPE_SL_BEYOND_FOREX, spread_rm=1.0*0.127*USD_MYR_RATE*0.01),
+    "AUDJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
+                   prox=120, sl_buf=HPE_SL_BEYOND_JPY, spread_rm=1.8*0.091*USD_MYR_RATE*0.01),
+    "CADJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
+                   prox=120, sl_buf=HPE_SL_BEYOND_JPY, spread_rm=2.0*0.091*USD_MYR_RATE*0.01),
+    "NZDJPY": dict(pip=0.01, pip_val_rm=0.091*USD_MYR_RATE,
+                   prox=120, sl_buf=HPE_SL_BEYOND_JPY, spread_rm=2.0*0.091*USD_MYR_RATE*0.01),
     # XAGUSD HPE: 0 signals — D1 pivot proximity too tight for Silver price scale
     # "XAGUSD": dict(pip=0.001, ...)  ← re-enable after prox/sl_buf calibration
 }

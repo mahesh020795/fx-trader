@@ -166,9 +166,21 @@ CTE_PROFILES = {
     # SUSPENDED from live trading. Left in profiles for future calibration run.
     # "XAGUSD": dict(pip=0.001, ...)  ← re-enable after pip_val fix
 }
+# ── v13 CANDIDATE MODE ───────────────────────────────────────
+# Symbols under evaluation. NOT in the live whitelist — they scan in this
+# harness only. Promotion to config.py requires spec §7 criteria.
+V13_CANDIDATES = {
+    "CTE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"],
+    "MRE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"],
+    "CBE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY"],   # XAGUSD: HARD BLOCKED
+    "HPE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"],
+    "GVE": ["XAGUSD"],
+}
+def v13_allowed(engine, symbol):
+    return engine_symbol_allowed(engine, symbol) or symbol in V13_CANDIDATES.get(engine, [])
+
 # v9 PRECISION: only whitelisted CTE symbols scan
-CONT_SYMBOLS = [s for s in CTE_PROFILES.keys()
-                if s != "XAGUSD" and engine_symbol_allowed("CTE", s)]
+CONT_SYMBOLS = [s for s in CTE_PROFILES.keys() if v13_allowed("CTE", s)]
 GVE_SYMBOL   = "XAUUSD"
 SILVER_SYMBOL = "XAGUSD"
 # v10 FIX: ALL_SYMBOLS must be the UNION of all engine whitelists + GVE.
@@ -177,6 +189,8 @@ SILVER_SYMBOL = "XAGUSD"
 _all_whitelisted = set()
 for _eng_syms in ENGINE_SYMBOL_WHITELIST.values():
     _all_whitelisted.update(_eng_syms)
+for _eng, _syms in V13_CANDIDATES.items():
+    _all_whitelisted.update(_syms)
 ALL_SYMBOLS = sorted(_all_whitelisted | {GVE_SYMBOL})
 
 # MRE profiles — test all non-JPY symbols
@@ -208,8 +222,7 @@ MRE_PROFILES = {
     # XAGUSD MRE: 0 signals — range detection parameters need Silver-specific tuning
     # "XAGUSD": dict(pip=0.001, ...)  ← re-enable after min_range calibration
 }
-MRE_SYMS = [s for s in MRE_PROFILES.keys()
-            if s != "XAGUSD" and engine_symbol_allowed("MRE", s)]
+MRE_SYMS = [s for s in MRE_PROFILES.keys() if v13_allowed("MRE", s)]
 
 # CBE profiles — test all symbols
 CBE_PROFILES = {
@@ -234,8 +247,7 @@ CBE_PROFILES = {
     # HARD BLOCKED from live trading until dedicated Silver CBE calibration
     # "XAGUSD": dict(pip=0.001, ...)  ← DO NOT re-enable without full investigation
 }
-CBE_SYMS = [s for s in CBE_PROFILES.keys()
-            if s != "XAGUSD" and engine_symbol_allowed("CBE", s)]
+CBE_SYMS = [s for s in CBE_PROFILES.keys() if v13_allowed("CBE", s)]
 
 # HPE profiles — test all symbols
 HPE_PROFILES = {
@@ -258,8 +270,14 @@ HPE_PROFILES = {
     # XAGUSD HPE: 0 signals — D1 pivot proximity too tight for Silver price scale
     # "XAGUSD": dict(pip=0.001, ...)  ← re-enable after prox/sl_buf calibration
 }
-HPE_SYMS = [s for s in HPE_PROFILES.keys()
-            if s != "XAGUSD" and engine_symbol_allowed("HPE", s)]
+HPE_SYMS = [s for s in HPE_PROFILES.keys() if v13_allowed("HPE", s)]
+
+# v13: ALL_SYMBOLS must only include candidates that HAVE profiles (Tasks 4-5
+# add them). Union-then-intersect so profile-less candidates are excluded
+# without reintroducing the v9 bug (symbols missing from ALL_SYMBOLS silently
+# never fetch).
+_profiled = set(CTE_PROFILES) | set(MRE_PROFILES) | set(CBE_PROFILES) | set(HPE_PROFILES) | {GVE_SYMBOL}
+ALL_SYMBOLS = sorted((_all_whitelisted | {GVE_SYMBOL}) & _profiled | {GVE_SYMBOL})
 
 # ── v13: PROFILE SANITY GATE ─────────────────────────────────
 from profile_sanity import check_profile

@@ -1392,6 +1392,13 @@ print("  RUNNING HPE (HTF Pullback Engine)")
 print(f"  All non-gold symbols → TRENDING regime, BUY only, D1 pivots")
 print(SEP)
 
+# v13 task-8: HPE variant flag — OFF by default (base = BUY-only). Flip to True
+# to backtest the SELL-side mirror (W1 downtrend, pullback UP to a pivot high,
+# continuation down). Trades produced under the variant are tagged
+# t["variant"]="HPE_SELL" so matrix_report.py buckets them into their own row,
+# never touching the "base" rows. Must be False in committed state.
+HPE_SELL = False   # v13 variant: test SELL-side mirror (TRENDING-down markets)
+
 def hpe_w1_dir(w1,d1):
     src=w1 if (w1 is not None and len(w1)>=HPE_W1_EMA_PERIOD+5) else d1
     if src is None or len(src)<HPE_W1_EMA_PERIOD+2: return None
@@ -1409,7 +1416,19 @@ def hpe_pivots(d1,lb=HPE_D1_PIVOT_LOOKBACK,n=HPE_D1_PIVOT_N):
            all(float(recent.iloc[i+j]["low"])>l for j in range(1,n+1)): lows.append(round(l,5))
     return highs,lows
 
-def hpe_find_level(highs,lows,current,pip,prox):
+def hpe_find_level(highs,lows,current,pip,prox,w1_dir="BUY"):
+    # w1_dir selects which side of the market structure to search: "BUY"
+    # (W1 uptrend) searches pivot LOWS at/below current price (pullback down
+    # to support, continuing up); "SELL" (W1 downtrend, HPE_SELL variant)
+    # searches pivot HIGHS at/above current price (pullback up to
+    # resistance, continuing down) — an exact mirror, not a fallback.
+    if w1_dir=="SELL":
+        if highs:
+            cands=[(abs(current-h)/pip,h) for h in highs if current<=h]
+            if cands:
+                dist,level=min(cands)
+                if dist<=prox: return level,"SELL"
+        return None,None
     if lows:
         cands=[(abs(current-l)/pip,l) for l in lows if current>=l]
         if cands:
@@ -1433,11 +1452,29 @@ def hpe_h4_mom(h4,direction,lb=HPE_H4_LOOKBACK):
         c=h4.tail(lb+2).iloc[i]; tr=float(c["high"]-c["low"])
         if tr==0: continue
         body=abs(float(c["close"])-float(c["open"]))/tr
-        ok=(direction=="BUY" and c["close"]>c["open"])
+        # BUY needs a bullish H4 candle (close>open); SELL mirror needs a
+        # bearish H4 candle (close<open) — momentum confirmation in the
+        # trade's own direction.
+        ok=(direction=="BUY" and c["close"]>c["open"]) or \
+           (direction=="SELL" and c["close"]<c["open"])
         if ok and body>best: best=body
     return best>=0.70,round(best,3)
 
 def hpe_lvls(direction,entry,level,highs,lows,pip,sl_buf):
+    if direction=="SELL":
+        # Mirror of the BUY branch: SL placed ABOVE the pivot high (with
+        # buffer), TP searched among pivot LOWS below entry (nearest one
+        # more than 10 pips away), falling back to a projected RR target.
+        sl=round(level+pip*sl_buf,5); slp=round((sl-entry)/pip,1)
+        tp_cands=[l for l in lows if l<entry-pip*10]
+        tp=max(tp_cands) if tp_cands else round(entry-pip*slp*HPE_MIN_RR,5)
+        tpp=round((entry-tp)/pip,1)
+        if slp<=0 or tpp<=0: return None,None,0,0,0
+        rr=round(tpp/slp,2)
+        if rr<HPE_MIN_RR: return None,None,0,0,0
+        if rr>HPE_MAX_RR:
+            tpp=round(slp*HPE_MAX_RR,1); tp=round(entry-pip*tpp,5); rr=HPE_MAX_RR
+        return sl,tp,round(slp,1),round(tpp,1),rr
     sl=round(level-pip*sl_buf,5); slp=round((entry-sl)/pip,1)
     tp_cands=[h for h in highs if h>entry+pip*10]
     tp=min(tp_cands) if tp_cands else round(entry+pip*slp*HPE_MIN_RR,5)
@@ -1455,7 +1492,14 @@ for sym in HPE_SYMS:
     p=HPE_PROFILES[sym]; pip=p["pip"]; pv=p["pip_val_rm"]
     d1a=data[sym]["D1"]; h4a=data[sym]["H4"]
     h1a=data[sym]["H1"]; w1a=data[sym].get("W1")
-    trades=[]; last_idx=-HPE_COOLDOWN_H1; mo_pnl=defaultdict(float)
+    # v13 task-8: trade-spacing (last_idx) and monthly-loss (mo_pnl) state,
+    # plus the running trade list itself, are bucketed PER VARIANT so a
+    # HPE_SELL trade never gates/shifts/pollutes-balance for base trades (or
+    # vice versa). With the flag off only the "base" bucket is ever touched —
+    # exactly the old single-state behavior (Task 7 GVE precedent).
+    trades_by=defaultdict(list)
+    last_idx_by=defaultdict(lambda:-HPE_COOLDOWN_H1)
+    mo_pnl_by=defaultdict(lambda:defaultdict(float))
     print(f"\n{sym} — scanning {len(h1a)} H1 candles (HPE)...")
 
     for i in range(300,len(h1a)-121):
@@ -1464,10 +1508,6 @@ for sym in HPE_SYMS:
         h_utc=dt.hour
         if not (SESSION_START_UTC<=h_utc<SESSION_END_UTC): continue
         if LONDON_KZ_START<=h_utc<LONDON_KZ_END: continue
-        if i-last_idx<HPE_COOLDOWN_H1: continue
-        mo=dt.strftime("%Y-%m")
-        bal=500+sum(t["pnl_rm"] for t in trades)
-        if mo_pnl[mo]<=-(bal*MAX_MONTHLY_LOSS_PCT/100): continue
 
         d1v=d1a[d1a["time"]<=dt].tail(250)
         h4v=h4a[h4a["time"]<=dt].tail(200)
@@ -1477,14 +1517,25 @@ for sym in HPE_SYMS:
 
         w1v=w1a[w1a["time"]<=dt].tail(30) if w1a is not None else None
         w1_dir=hpe_w1_dir(w1v,d1v)
-        if w1_dir!="BUY": continue
+        # v13 task-8: base is BUY-only (W1 uptrend, pullback down to a pivot
+        # low). HPE_SELL allows the mirror: W1 downtrend, pullback up to a
+        # pivot high. Old behavior (flag off) is `if w1_dir!="BUY": continue`.
+        if w1_dir!="BUY" and not (w1_dir=="SELL" and HPE_SELL): continue
+
+        variant="HPE_SELL" if w1_dir=="SELL" else "base"
+        trades=trades_by[variant]
+
+        if i-last_idx_by[variant]<HPE_COOLDOWN_H1: continue
+        mo=dt.strftime("%Y-%m")
+        bal=500+sum(t["pnl_rm"] for t in trades)
+        if mo_pnl_by[variant][mo]<=-(bal*MAX_MONTHLY_LOSS_PCT/100): continue
 
         h4v_cur=h4a[h4a["time"]<=dt].tail(5)
         if len(h4v_cur)<1: continue
         current=float(h4v_cur["close"].iloc[-1])
 
         highs,lows=hpe_pivots(d1v)
-        level,direction=hpe_find_level(highs,lows,current,pip,p["prox"])
+        level,direction=hpe_find_level(highs,lows,current,pip,p["prox"],w1_dir=w1_dir)
         if level is None: continue
 
         fib_ok,retrace_pct=hpe_fib_ok(d1v,direction,current,pip)
@@ -1513,16 +1564,23 @@ for sym in HPE_SYMS:
         out="timeout"; pp=0.0; ei=i
         for fi in range(i+1,min(i+121,len(h1a))):
             fc=h1a.iloc[fi]
-            if fc["low"]<=sl: out="loss"; pp=-sl_pips; ei=fi; break
-            if fc["high"]>=tp: out="win"; pp=tp_pips; ei=fi; break
+            if direction=="SELL":
+                # v13 task-8: SELL mirror of the BUY branch below — SL is
+                # ABOVE entry (hit on a HIGH spike), TP is BELOW entry (hit
+                # on a LOW dip).
+                if fc["high"]>=sl: out="loss"; pp=-sl_pips; ei=fi; break
+                if fc["low"]<=tp:  out="win";  pp=tp_pips;  ei=fi; break
+            else:
+                if fc["low"]<=sl: out="loss"; pp=-sl_pips; ei=fi; break
+                if fc["high"]>=tp: out="win"; pp=tp_pips; ei=fi; break
         if out=="timeout":
             lp=float(h1a.iloc[min(i+120,len(h1a)-1)]["close"])
-            pp=round((lp-entry)/pip,1)
+            pp=round((entry-lp)/pip,1) if direction=="SELL" else round((lp-entry)/pip,1)
             out="win" if pp>0 else "loss" if pp<0 else "be"; ei=i+120
 
-        
+
         current_balance = 500 + sum(t["pnl_rm"] for t in trades)
-        peak_balance = max([500] + [500 + sum(x["pnl_rm"] for x in trades[:i]) for i in range(len(trades)+1)])
+        peak_balance = max([500] + [500 + sum(x["pnl_rm"] for x in trades[:k]) for k in range(len(trades)+1)])
         current_dd = max(0.0, ((peak_balance - current_balance) / peak_balance) * 100)
 
         risk_pct, risk_mult = kira_dynamic_risk(
@@ -1541,19 +1599,23 @@ for sym in HPE_SYMS:
         elif 0              <=h_utc<7:             sess="Tokyo"
         else:                                      sess="Other"
 
-        t={"symbol":sym,"engine":"HPE","regime":"TRENDING","direction":"BUY",
+        t={"symbol":sym,"engine":"HPE","regime":"TRENDING","direction":direction,
            "grade":grade,"entry_dt":str(dt.date()),"month":mo,"year":str(dt.year),
            "dow":DAYS[dt.weekday()],"session":sess,"hold_hours":hold_h,
            "sl_pips":sl_pips,"tp_pips":tp_pips,"rr":rr,"outcome":out,
-           "pnl_pips":pp,"pnl_rm":pnl_rm,"risk_pct":risk_pct,"risk_mult":risk_mult}
-        trades.append(t); mo_pnl[mo]+=pnl_rm; last_idx=i
+           "pnl_pips":pp,"pnl_rm":pnl_rm,"risk_pct":risk_pct,"risk_mult":risk_mult,
+           "variant":variant}
+        trades.append(t); mo_pnl_by[variant][mo]+=pnl_rm; last_idx_by[variant]=i
 
-    ALL_TRADES.extend(trades)
-    if trades:
-        wins=[t for t in trades if t["outcome"]=="win"]
-        n=len(trades); wr=len(wins)/n*100
-        net=sum(t["pnl_rm"] for t in trades)
-        n_mo=len(set(t["month"] for t in trades))
+    all_sym_trades=[]
+    for _variant,_tlist in trades_by.items():
+        all_sym_trades.extend(_tlist)
+    ALL_TRADES.extend(all_sym_trades)
+    if all_sym_trades:
+        wins=[t for t in all_sym_trades if t["outcome"]=="win"]
+        n=len(all_sym_trades); wr=len(wins)/n*100
+        net=sum(t["pnl_rm"] for t in all_sym_trades)
+        n_mo=len(set(t["month"] for t in all_sym_trades))
         flag="✅" if net>0 else "❌"
         print(f"  → {n} signals | WR {wr:.1f}% | Net RM{net:+.2f} | {n/n_mo:.1f}/month {flag}")
     else:

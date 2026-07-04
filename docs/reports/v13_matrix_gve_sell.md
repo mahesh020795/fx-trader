@@ -1,0 +1,44 @@
+# v13 Compatibility Matrix
+
+| engine | symbol | variant | n_trades | wr | net_rm | pf | pf_ex_best | verdict |
+|---|---|---|---|---|---|---|---|---|
+| CBE | AUDJPY | base | 22 | 40.9 | 117.45 | 1.68 | 1.17 | PASS |
+| CBE | AUDUSD | base | 35 | 54.3 | 303.28 | 2.1 | 1.76 | PASS |
+| CBE | CADJPY | base | 20 | 55.0 | 431.83 | 3.4 | 2.8 | PASS |
+| CBE | EURGBP | base | 32 | 46.9 | 128.76 | 1.76 | 1.37 | PASS |
+| CBE | EURJPY | base | 24 | 58.3 | 968.37 | 4.01 | 3.43 | PASS |
+| CBE | GBPJPY | base | 23 | 56.5 | 608.44 | 2.57 | 2.02 | PASS |
+| CBE | GBPUSD | base | 15 | 40.0 | 117.12 | 1.75 | 1.18 | PASS |
+| CBE | NZDJPY | base | 18 | 50.0 | 137.34 | 1.79 | 1.42 | PASS |
+| CBE | NZDUSD | base | 17 | 35.3 | 21.66 | 1.2 | 0.85 | FAIL |
+| CBE | USDCAD | base | 20 | 45.0 | 193.59 | 2.04 | 1.52 | PASS |
+| CBE | USDCHF | base | 19 | 36.8 | 7.28 | 1.05 | 0.75 | FAIL |
+| CTE | AUDJPY | base | 4 | 50.0 | -31.64 | 0.53 | 0.19 | INSUFFICIENT_DATA |
+| CTE | AUDUSD | base | 15 | 40.0 | 52.04 | 1.7 | 1.2 | PASS |
+| CTE | CADJPY | base | 4 | 50.0 | 0.86 | 1.01 | 0.39 | INSUFFICIENT_DATA |
+| CTE | EURGBP | base | 13 | 23.1 | -2.67 | 0.95 | 0.48 | FAIL |
+| CTE | EURJPY | base | 4 | 75.0 | 152.77 | 3.51 | 1.68 | INSUFFICIENT_DATA |
+| CTE | EURUSD | base | 6 | 33.3 | 18.33 | 1.48 | 0.47 | INSUFFICIENT_DATA |
+| CTE | GBPJPY | base | 3 | 66.7 | 113.69 | 2.49 | 0.55 | INSUFFICIENT_DATA |
+| CTE | NZDJPY | base | 2 | 50.0 | 3.19 | 1.1 | 0.0 | INSUFFICIENT_DATA |
+| CTE | NZDUSD | base | 17 | 29.4 | 13.2 | 1.18 | 0.68 | FAIL |
+| CTE | USDCHF | base | 15 | 40.0 | 55.7 | 2.19 | 1.64 | PASS |
+| CTE | XAGUSD | base | 13 | 38.5 | 33.98 | 1.95 | 1.45 | PASS |
+| GVE | XAUUSD | GVE_SELL | 3 | 33.3 | -81.27 | 0.28 | 0.0 | INSUFFICIENT_DATA |
+| GVE | XAUUSD | base | 42 | 64.3 | 1011.4 | 1.8 | 1.67 | PASS |
+| HPE | AUDJPY | base | 1 | 0.0 | -18.06 | 0.0 | 0.0 | INSUFFICIENT_DATA |
+| HPE | EURGBP | base | 1 | 0.0 | -4.99 | 0.0 | 0.0 | INSUFFICIENT_DATA |
+| HPE | EURUSD | base | 3 | 66.7 | 81.57 | 5.27 | 2.07 | INSUFFICIENT_DATA |
+| HPE | USDCAD | base | 1 | 100.0 | 19.96 | 99.0 | 0.0 | INSUFFICIENT_DATA |
+| HPE | USDJPY | base | 2 | 100.0 | 140.87 | 99.0 | 99.0 | INSUFFICIENT_DATA |
+| HPE | XAGUSD | base | 1 | 0.0 | -13.59 | 0.0 | 0.0 | INSUFFICIENT_DATA |
+| MRE | AUDJPY | base | 16 | 31.2 | -75.07 | 0.64 | 0.43 | FAIL |
+| MRE | AUDUSD | base | 15 | 46.7 | 172.36 | 2.73 | 2.16 | PASS |
+| MRE | CADJPY | base | 17 | 17.6 | -127.89 | 0.3 | 0.12 | FAIL |
+| MRE | EURGBP | base | 19 | 47.4 | 180.79 | 2.17 | 1.72 | PASS |
+| MRE | EURUSD | base | 11 | 54.5 | 166.43 | 3.44 | 2.71 | PASS |
+| MRE | GBPUSD | base | 6 | 33.3 | 48.56 | 2.01 | 0.97 | INSUFFICIENT_DATA |
+| MRE | NZDJPY | base | 18 | 50.0 | 85.24 | 1.38 | 0.89 | FAIL |
+| MRE | NZDUSD | base | 21 | 38.1 | 152.82 | 2.07 | 1.62 | PASS |
+| MRE | USDCHF | base | 8 | 0.0 | -75.47 | 0.0 | 0.0 | INSUFFICIENT_DATA |
+| MRE | USDJPY | base | 6 | 33.3 | 43.0 | 1.55 | 0.71 | INSUFFICIENT_DATA |

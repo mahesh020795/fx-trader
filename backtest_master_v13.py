@@ -605,11 +605,20 @@ def gve_regime(m15,h1,d1,i_m15,i_h1):
     if ratio>=1.5:                return "EXPANSION",f"ATR expanding {ratio:.1f}x"
     return "NORMAL",f"ATR {ratio:.2f}x"
 
+# v13 task-7: GVE variant flags — OFF by default (base = BUY-only, London-only).
+# Flip one/both to True to backtest the SELL-side mirror and/or the NY killzone
+# window. Trades produced under a variant are tagged t["variant"] so the matrix
+# report (matrix_report.py) buckets them into their own row, never touching the
+# "base" rows. Both must be False in committed state.
+GVE_SELL      = False   # v13 variant: test SELL-side mirror (sweeps high-side pools)
+GVE_NY_WINDOW = False   # v13 variant: re-test NY 12:00-14:00 UTC window
+
 def gve_in_session(dt):
     h=dt.hour
     if dt.weekday()>=5: return False,"weekend"
     if dt.weekday()==4: return False,"friday"
     if GVE_LONDON_START<=h<GVE_LONDON_END: return True,"London_Open"
+    if GVE_NY_WINDOW and NY_KZ_START<=h<NY_KZ_END: return True,"NY_Open"
     return False,"outside"
 
 def gve_pools(m15,h1,i_m15,i_h1,dt):
@@ -821,7 +830,11 @@ if GVE_SYMBOL in data:
     h1a=data[GVE_SYMBOL]["H1"]; m15a=data[GVE_SYMBOL]["M15"]
     pip=get_pip("XAUUSD"); pip_val=100*0.01*LOT_GOLD*USD_MYR_RATE
     spread_cost=35*pip_val
-    gve_trades=[]; last_i=-20; mo_pnl=defaultdict(float)
+    # v13 task-7: trade-spacing (last_i) and monthly-loss (mo_pnl) state is
+    # bucketed PER VARIANT so variant trades never gate/shift base trades (or
+    # each other). With flags off only the "base" bucket is touched — exactly
+    # the old single-state behavior. This is the flag-isolation guarantee.
+    gve_trades=[]; last_i_by=defaultdict(lambda:-20); mo_pnl_by=defaultdict(lambda:defaultdict(float))
     print(f"\nXAUUSD (GVE) — scanning {len(m15a)} M15 candles...")
 
     for i in range(300,len(m15a)-193):
@@ -837,15 +850,27 @@ if GVE_SYMBOL in data:
         if regime in ["EXTREME","DEAD"]: continue
 
         d1v=d1a.iloc[max(0,i_d1-250):i_d1+1]
-        direction=d1_bias(d1v)
-        if direction is None or direction=="SELL": continue
+        bias=d1_bias(d1v)
+        if bias is None: continue
+        if bias=="SELL" and not GVE_SELL: continue
 
         i_h4=len(h4a[h4a["time"]<=dt])-1
         if i_h4>=GVE_H4_EMA_SLOPE_PERIOD+5:
             h4v_s=h4a.iloc[max(0,i_h4-60):i_h4+1]
             h4_ema50=h4v_s["close"].ewm(span=50,adjust=False).mean()
             slope=float(h4_ema50.iloc[-1])-float(h4_ema50.iloc[-(GVE_H4_EMA_SLOPE_PERIOD+1)])
-            if slope<=0: continue
+            # v13 task-7: slope filter mirrors the trend direction — BUY needs
+            # rising H4 EMA50, SELL needs falling H4 EMA50 (was BUY-only >0 check).
+            if bias=="BUY" and slope<=0: continue
+            if bias=="SELL" and slope>=0: continue
+
+        direction=bias
+        # v13 task-7: variant tag decided by direction + session; used both for
+        # matrix bucketing and for the per-variant gate state below.
+        variant_parts=[]
+        if direction=="SELL": variant_parts.append("SELL")
+        if sess=="NY_Open": variant_parts.append("NY")
+        variant="GVE_"+"_".join(variant_parts) if variant_parts else "base"
 
         pools=gve_pools(m15a,h1a,i,i_h1,dt)
         if not pools: continue
@@ -858,10 +883,10 @@ if GVE_SYMBOL in data:
         h1_atr=gve_calc_atr(h1a.iloc[max(0,i_h1-50):i_h1+1],14)
         if h1_atr==0: continue
         sl,tp,sl_pips,tp_pips,rr,tp_mult=gve_levels(direction,entry,h1_atr,grade)
-        if rr<GVE_MIN_RR or i-last_i<20: continue
+        if rr<GVE_MIN_RR or i-last_i_by[variant]<20: continue
 
         mo=dt.strftime("%Y-%m")
-        if mo_pnl[mo]<=-(500*MAX_MONTHLY_LOSS_PCT/100): continue
+        if mo_pnl_by[variant][mo]<=-(500*MAX_MONTHLY_LOSS_PCT/100): continue
 
         out="timeout"; pp=0.0; ei=i; partial_hit=False
         for fi in range(i+1,min(i+193,len(m15a))):
@@ -876,9 +901,19 @@ if GVE_SYMBOL in data:
                 if fc["high"]>=tp:
                     pp=sl_pips*0.50+sl_pips*tp_mult*0.50 if partial_hit else tp_pips
                     out="win"; ei=fi; break
+            else:  # SELL — v13 task-7 mirror of the BUY branch above
+                if not partial_hit and fc["low"]<=round(entry-pip*sl_pips,2):
+                    partial_hit=True
+                if partial_hit and fc["high"]>=entry:
+                    out="win"; pp=sl_pips*0.50; ei=fi; break
+                elif not partial_hit and fc["high"]>=sl:
+                    out="loss"; pp=-sl_pips; ei=fi; break
+                if fc["low"]<=tp:
+                    pp=sl_pips*0.50+sl_pips*tp_mult*0.50 if partial_hit else tp_pips
+                    out="win"; ei=fi; break
         if out=="timeout":
             lp=float(m15a.iloc[min(i+192,len(m15a)-1)]["close"])
-            pp=round((lp-entry)/pip,1)
+            pp=round((entry-lp)/pip,1) if direction=="SELL" else round((lp-entry)/pip,1)
             out="win" if pp>0 else "loss" if pp<0 else "be"; ei=i+192
 
         pnl_rm=round(pp*pip_val-spread_cost,2)
@@ -889,8 +924,9 @@ if GVE_SYMBOL in data:
            "entry_dt":str(dt.date()),"month":mo,"year":str(dt.year),
            "dow":DAYS[dt.weekday()],"session":sess,"hold_hours":hold_h,
            "sl_pips":sl_pips,"tp_pips":tp_pips,"rr":rr,"grade":grade,
-           "outcome":out,"pnl_pips":pp,"pnl_rm":pnl_rm,"risk_pct":risk_pct,"risk_mult":risk_mult}
-        gve_trades.append(t); mo_pnl[mo]+=pnl_rm; last_i=i
+           "outcome":out,"pnl_pips":pp,"pnl_rm":pnl_rm,"risk_pct":risk_pct,"risk_mult":risk_mult,
+           "variant":variant}
+        gve_trades.append(t); mo_pnl_by[variant][mo]+=pnl_rm; last_i_by[variant]=i
 
     ALL_TRADES.extend(gve_trades)
     if gve_trades:
@@ -909,7 +945,8 @@ if SILVER_SYMBOL in data and data[SILVER_SYMBOL].get("M15") is not None:
     pip_ag=0.001
     pip_val_ag=5000*0.001*LOT_XAGUSD*USD_MYR_RATE
     spread_cost_ag=5.0*pip_val_ag
-    ag_trades=[]; last_i_ag=-20; mo_pnl_ag=defaultdict(float)
+    # v13 task-7: per-variant gate state (see XAUUSD GVE section comment)
+    ag_trades=[]; last_i_ag_by=defaultdict(lambda:-20); mo_pnl_ag_by=defaultdict(lambda:defaultdict(float))
     print(f"\nXAGUSD (GVE) — scanning {len(m15a)} M15 candles...")
 
     for i in range(300, len(m15a)-193):
@@ -926,14 +963,23 @@ if SILVER_SYMBOL in data and data[SILVER_SYMBOL].get("M15") is not None:
 
         d1v=d1a.iloc[max(0,i_d1-250):i_d1+1]
         direction=d1_bias(d1v)
-        if direction is None or direction=="SELL": continue
+        if direction is None: continue
+        if direction=="SELL" and not GVE_SELL: continue
 
         i_h4=len(h4a[h4a["time"]<=dt])-1
         if i_h4>=GVE_H4_EMA_SLOPE_PERIOD+5:
             h4v_s=h4a.iloc[max(0,i_h4-60):i_h4+1]
             h4_ema50=h4v_s["close"].ewm(span=50,adjust=False).mean()
             slope=float(h4_ema50.iloc[-1])-float(h4_ema50.iloc[-(GVE_H4_EMA_SLOPE_PERIOD+1)])
-            if slope<=0: continue
+            # v13 task-7: slope filter mirrors trend direction (see XAUUSD GVE section)
+            if direction=="BUY" and slope<=0: continue
+            if direction=="SELL" and slope>=0: continue
+
+        # v13 task-7: variant tag (also keys the per-variant gate state)
+        variant_parts=[]
+        if direction=="SELL": variant_parts.append("SELL")
+        if sess=="NY_Open": variant_parts.append("NY")
+        variant="GVE_"+"_".join(variant_parts) if variant_parts else "base"
 
         pools=gve_pools(m15a,h1a,i,i_h1,dt)
         if not pools: continue
@@ -954,13 +1000,13 @@ if SILVER_SYMBOL in data and data[SILVER_SYMBOL].get("M15") is not None:
         tp_mult_ag=(GVE_TP_ATR_MULT_A if grade=="A" else GVE_TP_ATR_MULT_B)
         tp_pips_ag=round(sl_pips_ag*tp_mult_ag, 1)
         rr_ag=round(tp_pips_ag/sl_pips_ag, 2) if sl_pips_ag>0 else tp_mult_ag
-        if rr_ag<GVE_MIN_RR or i-last_i_ag<20: continue
+        if rr_ag<GVE_MIN_RR or i-last_i_ag_by[variant]<20: continue
 
         sl_p=round(entry-pip_ag*sl_pips_ag,3) if direction=="BUY" else round(entry+pip_ag*sl_pips_ag,3)
         tp_p=round(entry+pip_ag*tp_pips_ag,3) if direction=="BUY" else round(entry-pip_ag*tp_pips_ag,3)
 
         mo=dt.strftime("%Y-%m")
-        if mo_pnl_ag[mo]<=-(500*MAX_MONTHLY_LOSS_PCT/100): continue
+        if mo_pnl_ag_by[variant][mo]<=-(500*MAX_MONTHLY_LOSS_PCT/100): continue
 
         risk_pct_ag,risk_mult_ag=kira_dynamic_risk("GVE","GVE","XAGUSD")
 
@@ -977,9 +1023,19 @@ if SILVER_SYMBOL in data and data[SILVER_SYMBOL].get("M15") is not None:
                 if fc["high"]>=tp_p:
                     pp=sl_pips_ag*0.50+sl_pips_ag*tp_mult_ag*0.50 if partial_hit else tp_pips_ag
                     out="win"; ei=fi; break
+            else:  # SELL — v13 task-7 mirror of the BUY branch above
+                if not partial_hit and fc["low"]<=round(entry-pip_ag*sl_pips_ag,3):
+                    partial_hit=True
+                if partial_hit and fc["high"]>=entry:
+                    out="win"; pp=sl_pips_ag*0.50; ei=fi; break
+                elif not partial_hit and fc["high"]>=sl_p:
+                    out="loss"; pp=-sl_pips_ag; ei=fi; break
+                if fc["low"]<=tp_p:
+                    pp=sl_pips_ag*0.50+sl_pips_ag*tp_mult_ag*0.50 if partial_hit else tp_pips_ag
+                    out="win"; ei=fi; break
         if out=="timeout":
             lp=float(m15a.iloc[min(i+192,len(m15a)-1)]["close"])
-            pp=round((lp-entry)/pip_ag, 1)
+            pp=round((entry-lp)/pip_ag, 1) if direction=="SELL" else round((lp-entry)/pip_ag, 1)
             out="win" if pp>0 else "loss" if pp<0 else "be"; ei=i+192
 
         pnl_rm=round(pp*pip_val_ag-spread_cost_ag, 2)
@@ -991,8 +1047,8 @@ if SILVER_SYMBOL in data and data[SILVER_SYMBOL].get("M15") is not None:
            "dow":DAYS[dt.weekday()],"session":sess,"hold_hours":hold_h,
            "sl_pips":sl_pips_ag,"tp_pips":tp_pips_ag,"rr":rr_ag,"grade":grade,
            "outcome":out,"pnl_pips":pp,"pnl_rm":pnl_rm,
-           "risk_pct":risk_pct_ag,"risk_mult":risk_mult_ag}
-        ag_trades.append(t); mo_pnl_ag[mo]+=pnl_rm; last_i_ag=i
+           "risk_pct":risk_pct_ag,"risk_mult":risk_mult_ag,"variant":variant}
+        ag_trades.append(t); mo_pnl_ag_by[variant][mo]+=pnl_rm; last_i_ag_by[variant]=i
 
     ALL_TRADES.extend(ag_trades)
     if ag_trades:

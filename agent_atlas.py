@@ -295,6 +295,23 @@ class AgentATLAS:
                                       f"trades — 0.75x until recovery")
         return 1.0, "HEALTHY", f"rolling PF {pf:.2f}"
 
+    def get_probation_mult(self, symbol, engine):
+        """v13: newly-promoted combos (config.PROBATION_COMBOS) trade at
+        PROBATION_MULT size until they accumulate PROBATION_GRADUATION closed
+        signals, then auto-graduate to 1.0x. Non-probation and graduated
+        combos return 1.0. Returns (multiplier, n_closed_signals)."""
+        from config import (PROBATION_COMBOS, PROBATION_MULT,
+                            PROBATION_GRADUATION)
+        if (engine, symbol) not in PROBATION_COMBOS:
+            return 1.0, 0
+        n = sum(1 for t in self.trade_history
+                if t.get("status") in ("win", "loss", "be")
+                and t.get("symbol") == symbol
+                and t.get("engine") == engine)
+        if n >= PROBATION_GRADUATION:
+            return 1.0, n          # graduated — full size
+        return PROBATION_MULT, n
+
     def combo_health_report(self):
         """Full health table across all combos with live history."""
         combos = {}

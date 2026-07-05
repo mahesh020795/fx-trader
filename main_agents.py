@@ -299,8 +299,16 @@ class FXCommandAgents:
                            "lot_size": oracle_brief["lot_size"]})
 
         # v10/v11: apply exposure + combo-health multipliers
+        # v13: + probation sizing for newly-promoted combos (auto-graduates
+        #      to 1.0x after config.PROBATION_GRADUATION closed signals)
+        prob_mult, prob_n = self.atlas.get_probation_mult(
+            symbol, kira_brief.get("engine", "SIG"))
+        if prob_mult < 1.0:
+            logger.info(f"PROBATION {symbol} {kira_brief.get('engine')}: "
+                        f"{prob_mult}x sizing ({prob_n}/{PROBATION_GRADUATION} signals)")
         exp_mult = (kira_brief.get("exposure_mult", 1.0) *
-                    kira_brief.get("combo_mult", 1.0))
+                    kira_brief.get("combo_mult", 1.0) *
+                    prob_mult)
         if exp_mult < 1.0 and "lot_size" in oracle_brief:
             oracle_brief["lot_size"] = max(0.01,
                 round(oracle_brief["lot_size"] * exp_mult / 0.01) * 0.01)

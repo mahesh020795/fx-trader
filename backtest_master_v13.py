@@ -2023,8 +2023,14 @@ print(f"  Matrix report: {_md_path}")
 df.to_csv("backtest_master_v10.csv",index=False)
 with open("backtest_master_v10.json","w") as f:
     json.dump(ALL_TRADES,f,indent=2,default=str)
+# v13 Task 10A (additive, read-only for downstream analysis): emit a
+# properly-named v13 trades JSON so walkforward_v13.py / montecarlo_v13.py
+# consume the full expanded universe under a non-misleading filename,
+# without touching the legacy v10-named outputs above or the matrix/CSV.
+with open("backtest_master_v13.json","w") as f:
+    json.dump(ALL_TRADES,f,indent=2,default=str)
 print(f"\n{SEP}")
-print(f"  Saved: backtest_master_v10.csv + backtest_master_v10.json")
+print(f"  Saved: backtest_master_v10.csv + backtest_master_v10.json + backtest_master_v13.json")
 print(f"  Total trades: {n}  (incl. XAGUSD suspended runs for analysis)")
 print(f"  v7 baseline: 396 signals | WR 43.4% | RM+3863 | Sharpe 2.27 | DD 19.8%")
 print(f"  v5 baseline: 162 signals | WR 54.3% | RM+2177 | Sharpe 1.84")

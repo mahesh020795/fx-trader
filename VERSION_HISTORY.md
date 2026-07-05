@@ -21,7 +21,18 @@ Parameter changes are recorded in this file's notes instead.
 | v11 | Jun 2026 | Walk-forward validator, Monte Carlo (fixed mode) | 287 | 49.5% | +RM4,192 | 2.53 | 12.6% | 2.19 | — |
 | v11.1 | Jun 2026 | Monte Carlo compounding mode, GUARD capital-adequacy rule | 287 | 49.5% | +RM4,192 | 2.53 | 12.6% | 2.19 | — |
 | v12 | 14 Jun 2026 | SAGE self-review agent, Prop Firm Mode in GUARD | 287 | 49.5% | +RM4,192 | 2.53 | 12.6% | 2.19 | git tag `v12` (initial commit) |
-| v13 | Jul 2026 (in progress) | Validated Signal Expansion — new symbol universe test, XAGUSD recalibration, GVE SELL/NY variants, sell-side engine mirrors, new-market compatibility scan. Spec: `docs/specs/2026-07-03-v13-signal-expansion-design.md` | TBD | TBD | TBD | TBD | TBD | TBD | git tag `v13` when complete |
+| **v13** | 6 Jul 2026 | **Validated Signal Expansion** — promoted 4 new engine×symbol combos (see notes). Walk-forward ROBUST 5/5 OOS folds (+RM1,839.85 whitelist net, median PF 1.87); Monte Carlo median DD 21.7% / P95 52.6% / ruin 3.83% (all slightly better than v10 baseline via diversification). v10 core unchanged — v13 adds to it. | 287+4 combos | — | — | — | 21.7% (MC med) | — | git tag `v13` |
+
+### v13 promotions (config.py — untracked; recorded here per the config-is-never-committed rule)
+Added to `KIRA_ROUTING_TABLE`, `ENGINE_SYMBOL_WHITELIST`, and `PAIRS`/`JPY_PAIRS`:
+- **CBE × CADJPY** — matrix PF 3.40, OOS +RM298 (4/5 folds). Strongest.
+- **CTE × USDCHF** — matrix PF 2.19, OOS +RM68 (4/5 folds).
+- **MRE × EURGBP** — matrix PF 2.17, OOS +RM81 (4/5 folds).
+- **CBE × EURGBP** — matrix PF 1.76, OOS +RM51 (3/5 folds).
+
+Held (net-positive but not promoted this round): CBE×AUDJPY (OOS 2/4 folds), CTE×XAGUSD (unstable PF 1.26→1.95 across runs, whitelisted only 1/4 OOS folds, unresolved Silver pip-value uncertainty). Rejected: CBE×NZDJPY (in-sample PF 1.79 but OOS-NEGATIVE −RM18.73 — the walk-forward curve-fit catch). No GVE/HPE variant promoted (SELL/NY all failed). "Probation" is a monitoring convention only — no coded 0.5× sizing mechanism exists. To revert: remove the four `# v13` entries from config.py and `git checkout v12` for tracked files.
+
+**Open items for a future session:** (1) two currently-live combos now FAIL the matrix — CBE×NZDUSD (PF 1.20) and CTE×NZDUSD (PF 1.18); NOT auto-demoted (v10 lesson: don't re-filter on one window; ATLAS alpha-decay brake is the designed mechanism) — monitor in SIM. (2) XAGUSD GVE-scan and config.py still carry the naive pip_val (10× oversized) — fix before any Silver retry. (3) 51 non-FX markets surfaced by the scan await a new-engine spec.
 
 ## Naming note
 

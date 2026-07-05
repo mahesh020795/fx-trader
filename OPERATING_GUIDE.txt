@@ -30,9 +30,10 @@ STEP 3: Configure MT5 desktop
    • Tools → Options → Expert Advisors → tick:
        ✅ Allow automated trading
        ✅ Allow DLL imports
-   • Make sure all 9 symbols are visible in Market Watch:
+   • Make sure all 12 symbols are visible in Market Watch:
        AUDUSD EURUSD EURJPY GBPUSD GBPJPY
        NZDUSD USDCAD USDJPY XAUUSD
+       USDCHF EURGBP CADJPY          (v13 promoted — required)
 
 STEP 4: Add XAUUSD M15 data to MT5
 ─────────────────────────────────────

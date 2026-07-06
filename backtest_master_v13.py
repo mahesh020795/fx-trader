@@ -373,6 +373,15 @@ HPE_SYMS = [s for s in HPE_PROFILES.keys() if v13_allowed("HPE", s)]
 _profiled = set(CTE_PROFILES) | set(MRE_PROFILES) | set(CBE_PROFILES) | set(HPE_PROFILES) | {GVE_SYMBOL}
 ALL_SYMBOLS = sorted((_all_whitelisted | {GVE_SYMBOL}) & _profiled | {GVE_SYMBOL})
 
+# v14 task-5: SRE — Stop Run Exhaustion Engine, flag-gated (default OFF).
+# Symbols: exactly the 11 FX pairs from spec §4. Reuses CTE_PROFILES (pip,
+# pip_val_rm, spread_rm) — no separate SRE_PROFILES dict needed. Preload/fetch
+# only pulls M15 for these 11 when the flag is ON (additive fetch cost, never
+# paid on a flag-OFF run — see preload section below).
+SRE_ENABLED = False
+SRE_SYMBOLS = ["AUDUSD","EURUSD","GBPUSD","NZDUSD","USDCAD","USDCHF",
+               "EURGBP","EURJPY","GBPJPY","USDJPY","CADJPY"]
+
 # ── v13: PROFILE SANITY GATE ─────────────────────────────────
 from profile_sanity import check_profile
 _sanity_violations = []
@@ -399,6 +408,10 @@ for sym in ALL_SYMBOLS:
     print(f"  {sym}...", end=" ", flush=True)
     tfs = [TF_D1, TF_H4, TF_H1, TF_W1]
     if sym in (GVE_SYMBOL, SILVER_SYMBOL): tfs += [TF_M15]
+    # v14 task-5: SRE needs M15 for its 11 FX pairs. FX engines (CTE/MRE/CBE/
+    # HPE) never fetched M15 before — additive only, and only paid when the
+    # flag is ON (flag-OFF run cost is unchanged from v13).
+    if SRE_ENABLED and sym in SRE_SYMBOLS: tfs += [TF_M15]
     preload(sym, tfs)
     print("done")
 time.sleep(3.0)
@@ -424,6 +437,10 @@ for sym in ALL_SYMBOLS:
         # documented fix per task-5 brief (GVE needs the full M15 history).
         m15_count = 99999
         m15=fetch(sym,TF_M15,m15_count)
+        entry["M15"] = m15
+    elif SRE_ENABLED and sym in SRE_SYMBOLS:
+        # v14 task-5: SRE scans M15 bar-by-bar like GVE; full history window.
+        m15=fetch(sym,TF_M15,99999)
         entry["M15"] = m15
     else:
         m15 = None
@@ -1620,6 +1637,245 @@ for sym in HPE_SYMS:
         print(f"  → {n} signals | WR {wr:.1f}% | Net RM{net:+.2f} | {n/n_mo:.1f}/month {flag}")
     else:
         print(f"  → 0 signals")
+
+# ══════════════════════════════════════════════════════════
+#  6. SRE — STOP RUN EXHAUSTION (11 FX pairs, London/NY KZ reversals)
+# ══════════════════════════════════════════════════════════
+# v14 task-5: session stop-run REVERSALS. Mirrors the MRE section's skeleton
+# (per-symbol loop -> day/window detection -> bar-by-bar sim -> ALL_TRADES.
+# extend) but consumes sre_logic.py exactly as reviewed in Task 4 — no reimpl.
+# SRE_ENABLED is declared near ALL_SYMBOLS (must be defined before preload/
+# fetch decide whether to pull M15 for the 11 FX pairs); restated here as a
+# banner only.
+print(f"\n{SEP}")
+print("  RUNNING SRE (Stop Run Exhaustion Engine)")
+print(f"  11 FX pairs | London KZ 07-09 UTC + NY KZ 12-14 UTC | flag={'ON' if SRE_ENABLED else 'OFF'}")
+print(SEP)
+
+from sre_logic import SRE_DEFAULTS, classify_sweep, confirm_reversal, sre_levels, asian_range
+
+def sre_m15_atr_series(m15, period=14):
+    """Vectorized M15 ATR(14), same TR construction as gve_calc_atr but
+    returned as a full series (per-bar) instead of a single latest value —
+    SRE needs the ATR at the Asian window and at the confirming bar, not
+    just 'now'."""
+    h=m15["high"]; l=m15["low"]; pc=m15["close"].shift(1)
+    tr=pd.concat([h-l,(h-pc).abs(),(l-pc).abs()],axis=1).max(axis=1)
+    return tr.ewm(com=period-1,adjust=False).mean()
+
+if SRE_ENABLED:
+    for sym in SRE_SYMBOLS:
+        if sym not in data or data[sym].get("M15") is None:
+            print(f"\n{sym}: SKIPPED — no M15 data"); continue
+        p=CTE_PROFILES[sym]; pip=p["pip"]; pv=p["pip_val_rm"]
+        m15a=data[sym]["M15"]
+        is_jpy_sym=("JPY" in sym)
+        min_sweep_pips=(SRE_DEFAULTS["min_sweep_pips_jpy"] if is_jpy_sym
+                        else SRE_DEFAULTS["min_sweep_pips_fx"])
+        sl_cap=(SRE_DEFAULTS["sl_max_pips_jpy"] if is_jpy_sym
+                else SRE_DEFAULTS["sl_max_pips_fx"])
+
+        # SRE-private state ONLY — own spacing dict (per KZ-window key), own
+        # monthly-loss tracking. Never shared with any other engine's state.
+        trades=[]
+        last_trade_date_by_window=defaultdict(lambda:None)  # (window)->last date traded
+        mo_pnl=defaultdict(float)
+        print(f"\n{sym} (SRE) — scanning {len(m15a)} M15 candles...")
+
+        atr_series=sre_m15_atr_series(m15a)
+
+        # Precompute day boundaries: first bar index for each calendar date.
+        m15a=m15a.reset_index(drop=True)
+        dates=m15a["time"].dt.date
+        unique_dates=dates.drop_duplicates().tolist()
+        day_start_idx_map={}
+        for _di, _date in enumerate(unique_dates):
+            day_start_idx_map[_date]=int((dates==_date).idxmax())
+
+        # Rolling 20-day history of each day's Asian-window mean ATR, keyed by
+        # date order, used to gate DEAD/HYPER regime days per spec (§ the
+        # day's ATR vs its own trailing 20-day rolling mean).
+        daily_asian_atr=[]  # list of (date, mean_atr) in chronological order
+
+        for day_i, cur_date in enumerate(unique_dates):
+            if cur_date.weekday()>=5 or cur_date.weekday()==4:
+                continue
+            day_start_idx=day_start_idx_map[cur_date]
+            # asian_range expects a list of bar dicts; slice the day's window
+            # directly instead of converting the whole frame (perf: avoid
+            # materializing 99,999 dict rows every day).
+            window_df=m15a.iloc[day_start_idx:day_start_idx+28]
+            if len(window_df)<20:
+                continue
+            window_bars=window_df[["open","high","low","close"]].to_dict("records")
+            rng=asian_range(window_bars, 0)
+            if rng is None:
+                continue
+            asian_high,asian_low=rng
+            asian_mid=round((asian_high+asian_low)/2,5)
+
+            # ATR regime gate: day's Asian-window mean ATR vs its own trailing
+            # 20-day rolling mean (SRE_DEFAULTS atr_dead_ratio/hyper_ratio).
+            window_end_idx=min(day_start_idx+28,len(m15a))
+            day_atr_mean=float(atr_series.iloc[day_start_idx:window_end_idx].mean())
+            if len(daily_asian_atr)>=20:
+                avg_20=sum(v for _,v in daily_asian_atr[-20:])/20
+                if avg_20>0:
+                    ratio=day_atr_mean/avg_20
+                    if ratio<SRE_DEFAULTS["atr_dead_ratio"] or ratio>SRE_DEFAULTS["atr_hyper_ratio"]:
+                        daily_asian_atr.append((cur_date,day_atr_mean))
+                        continue
+            daily_asian_atr.append((cur_date,day_atr_mean))
+
+            # Prior-day high/low — secondary sweep pool.
+            if day_i>0:
+                prev_date=unique_dates[day_i-1]
+                prev_start=day_start_idx_map[prev_date]
+                prev_end=day_start_idx
+                prev_window=m15a.iloc[prev_start:prev_end]
+                prior_high=float(prev_window["high"].max()) if len(prev_window)>0 else asian_high
+                prior_low =float(prev_window["low"].min())  if len(prev_window)>0 else asian_low
+            else:
+                prior_high,prior_low=asian_high,asian_low
+
+            for kz_name,kz_start,kz_end,sess_label in (
+                ("London",LONDON_KZ_START,LONDON_KZ_END,"London_KZ"),
+                ("NY",NY_KZ_START,NY_KZ_END,"NY_KZ")):
+                window_key=(sym,kz_name)
+                if last_trade_date_by_window[window_key]==cur_date:
+                    continue  # max ONE trade per symbol per KZ window per day
+
+                kz_mask=(m15a["time"].dt.date==cur_date) & \
+                        (m15a["time"].dt.hour>=kz_start) & (m15a["time"].dt.hour<kz_end)
+                kz_idx=m15a.index[kz_mask].tolist()
+                if not kz_idx:
+                    continue
+
+                traded_this_window=False
+                for i in kz_idx:
+                    if traded_this_window:
+                        break
+                    bar_row=m15a.iloc[i]
+                    bar={"open":float(bar_row["open"]),"high":float(bar_row["high"]),
+                         "low":float(bar_row["low"]),"close":float(bar_row["close"])}
+                    dt=bar_row["time"]
+
+                    # Primary pool: Asian high/low. Secondary pool: prior-day
+                    # high/low. Sweep classification runs against each pool in
+                    # that order; first hit wins.
+                    sweep=None; sweep_pool_high=asian_high; sweep_pool_low=asian_low
+                    for pool_high,pool_low in ((asian_high,asian_low),(prior_high,prior_low)):
+                        sweep=classify_sweep(bar,pool_high,pool_low,pip,min_sweep_pips)
+                        if sweep:
+                            sweep_pool_high,sweep_pool_low=pool_high,pool_low
+                            break
+                    if not sweep:
+                        continue
+
+                    direction="SELL" if sweep=="SWEPT_HIGH" else "BUY"
+                    sweep_extreme=float(bar_row["high"]) if sweep=="SWEPT_HIGH" else float(bar_row["low"])
+                    opposite_pool=sweep_pool_low if sweep=="SWEPT_HIGH" else sweep_pool_high
+
+                    bars_after_idx=[j for j in range(i+1,min(i+1+SRE_DEFAULTS["confirm_bars"],len(m15a)))]
+                    bars_after=[{"open":float(m15a.iloc[j]["open"]),"high":float(m15a.iloc[j]["high"]),
+                                 "low":float(m15a.iloc[j]["low"]),"close":float(m15a.iloc[j]["close"])}
+                                for j in bars_after_idx]
+                    if not confirm_reversal(bars_after,direction):
+                        continue
+
+                    # confirm_reversal (sre_logic) only reports True/False for
+                    # the whole window; find WHICH bar triggered it by testing
+                    # bars one at a time (same predicate, singleton list) so
+                    # entry is the confirming bar's own close, per spec.
+                    confirm_j=None
+                    for k,b in enumerate(bars_after):
+                        if confirm_reversal([b],direction):
+                            confirm_j=bars_after_idx[k]; break
+                    if confirm_j is None:
+                        continue
+
+                    # Entry is the confirming bar's close (spec), so entry_dt/
+                    # dow/hold_hours must reference the confirming bar's time,
+                    # not the earlier sweep bar's time (`dt` is reassigned here
+                    # to the actual entry timestamp for everything downstream).
+                    dt=m15a.iloc[confirm_j]["time"]
+                    mo=dt.strftime("%Y-%m")
+                    bal=500+sum(t["pnl_rm"] for t in trades)
+                    if mo_pnl[mo]<=-(bal*MAX_MONTHLY_LOSS_PCT/100):
+                        continue
+
+                    entry=round(float(m15a.iloc[confirm_j]["close"]),5)
+                    atr_m15=float(atr_series.iloc[confirm_j])
+                    if atr_m15<=0:
+                        continue
+                    lvls=sre_levels(direction,entry,sweep_extreme,asian_mid,opposite_pool,
+                                     pip,atr_m15,is_jpy=is_jpy_sym)
+                    if lvls is None:
+                        continue
+                    sl,tp,sl_pips,tp_pips,rr=lvls
+                    if sl_pips>sl_cap:
+                        continue
+
+                    # Outcome sim: bar-by-bar M15 from the entry bar. SL first,
+                    # then TP; timeout = end of THIS session + 8h -> exit at
+                    # close (session end here means kz_end on cur_date).
+                    session_end_dt=pd.Timestamp(cur_date,tz="UTC")+pd.Timedelta(hours=kz_end)
+                    timeout_dt=session_end_dt+pd.Timedelta(hours=8)
+
+                    out="timeout"; pp=0.0; ei=confirm_j
+                    for fi in range(confirm_j+1,len(m15a)):
+                        fc=m15a.iloc[fi]
+                        if fc["time"]>timeout_dt:
+                            break
+                        if direction=="SELL":
+                            if fc["high"]>=sl: out="loss"; pp=-sl_pips; ei=fi; break
+                            if fc["low"] <=tp: out="win";  pp=tp_pips;  ei=fi; break
+                        else:
+                            if fc["low"] <=sl: out="loss"; pp=-sl_pips; ei=fi; break
+                            if fc["high"]>=tp: out="win";  pp=tp_pips;  ei=fi; break
+                    if out=="timeout":
+                        # exit at the close of the last bar at/before timeout
+                        to_idx=m15a.index[(m15a.index>confirm_j)&(m15a["time"]<=timeout_dt)]
+                        ei=int(to_idx.max()) if len(to_idx)>0 else confirm_j
+                        lp=float(m15a.iloc[ei]["close"])
+                        pp=round((entry-lp)/pip if direction=="SELL" else (lp-entry)/pip,1)
+                        out="win" if pp>0 else "loss" if pp<0 else "be"
+
+                    # KIRA risk scoring is a pure function of (engine, regime,
+                    # symbol, current_dd) — calling it is NOT shared state; the
+                    # current_dd input below is derived only from THIS engine's
+                    # own private `trades` list, mirroring the MRE section.
+                    current_balance=500+sum(x["pnl_rm"] for x in trades)
+                    peak_balance=max([500]+[500+sum(x["pnl_rm"] for x in trades[:k]) for k in range(len(trades)+1)])
+                    current_dd=max(0.0,((peak_balance-current_balance)/peak_balance)*100)
+                    risk_pct,risk_mult=kira_dynamic_risk(engine="SRE",regime="STOP_RUN",
+                                                          symbol=sym,current_dd=current_dd)
+
+                    pnl_rm=round((pp*pv-p["spread_rm"])*risk_mult,2)
+                    exit_dt=m15a.iloc[min(ei,len(m15a)-1)]["time"]
+                    hold_h=round((exit_dt-dt).total_seconds()/3600,1)
+
+                    t={"symbol":sym,"engine":"SRE","regime":"STOP_RUN","direction":direction,
+                       "grade":"B","entry_dt":str(dt.date()),"month":mo,"year":str(dt.year),
+                       "dow":DAYS[dt.weekday()],"session":sess_label,"hold_hours":hold_h,
+                       "sl_pips":sl_pips,"tp_pips":tp_pips,"rr":rr,"outcome":out,
+                       "pnl_pips":pp,"pnl_rm":pnl_rm,"risk_pct":risk_pct,"risk_mult":risk_mult}
+                    trades.append(t); mo_pnl[mo]+=pnl_rm
+                    last_trade_date_by_window[window_key]=cur_date
+                    traded_this_window=True
+
+        ALL_TRADES.extend(trades)
+        if trades:
+            wins=[t for t in trades if t["outcome"]=="win"]
+            n=len(trades); wr=len(wins)/n*100
+            net=sum(t["pnl_rm"] for t in trades)
+            n_mo=len(set(t["month"] for t in trades))
+            flag="✅" if net>0 else "❌"
+            print(f"  → {n} signals | WR {wr:.1f}% | Net RM{net:+.2f} | {n/n_mo:.1f}/month {flag}")
+        else:
+            print(f"  → 0 signals")
+else:
+    print("  SRE_ENABLED=False — skipping (zero SRE rows expected this run)")
 
 # ══════════════════════════════════════════════════════════
 #  REPORT

@@ -41,3 +41,14 @@
 | MRE | NZDUSD | base | 21 | 38.1 | 152.82 | 2.07 | 1.62 | PASS |
 | MRE | USDCHF | base | 8 | 0.0 | -75.47 | 0.0 | 0.0 | INSUFFICIENT_DATA |
 | MRE | USDJPY | base | 6 | 33.3 | 43.0 | 1.55 | 0.71 | INSUFFICIENT_DATA |
+| SRE | AUDUSD | base | 169 | 38.5 | -5.59 | 0.99 | 0.94 | FAIL |
+| SRE | CADJPY | base | 125 | 39.2 | 23.79 | 1.07 | 0.98 | FAIL |
+| SRE | EURGBP | base | 154 | 41.6 | 46.22 | 1.11 | 1.08 | FAIL |
+| SRE | EURJPY | base | 241 | 33.2 | -118.86 | 0.74 | 0.71 | FAIL |
+| SRE | EURUSD | base | 255 | 36.9 | 93.68 | 1.17 | 1.13 | FAIL |
+| SRE | GBPJPY | base | 258 | 35.3 | -64.16 | 0.9 | 0.86 | FAIL |
+| SRE | GBPUSD | base | 327 | 33.3 | -81.25 | 0.87 | 0.84 | FAIL |
+| SRE | NZDUSD | base | 170 | 35.3 | -44.65 | 0.86 | 0.81 | FAIL |
+| SRE | USDCAD | base | 218 | 32.6 | -81.83 | 0.68 | 0.66 | FAIL |
+| SRE | USDCHF | base | 192 | 34.4 | -52.28 | 0.88 | 0.84 | FAIL |
+| SRE | USDJPY | base | 181 | 33.7 | -87.86 | 0.78 | 0.74 | FAIL |

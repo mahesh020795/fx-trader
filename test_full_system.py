@@ -8,7 +8,7 @@
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 # ── colour helpers (Windows safe) ──────────────────────────
 def ok(msg):  print(f"  [PASS] {msg}")
@@ -304,8 +304,15 @@ try:
     g2.start_balance    = SIM_BALANCE_USD
     g2.peak_balance     = SIM_BALANCE_USD
     g2.weekly_pnl_usd   = -15.0  # exceeds 8% of $125
-    g2._last_week       = None
-    g2._last_month      = None
+    # v14 fix (6 Jul 2026): _last_week/_last_month must match TODAY's real
+    # week/month, not None. can_trade() calls _reset_if_new_period() first,
+    # which zeroes weekly_pnl_usd whenever _last_week != the current ISO
+    # week — None always mismatches, silently wiping the injected loss
+    # before the limit check ever ran (test always false-passed outside
+    # session hours via the separate "Outside" escape clause, masking this).
+    g2._last_week       = date.today().isocalendar()[1]
+    g2._last_month      = date.today().month
+    g2._last_day        = date.today()
     can2, reason2 = g2.can_trade()
     record("Weekly loss limit blocks trading",
            not can2 or "Weekly" in reason2 or "Outside" in reason2,

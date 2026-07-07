@@ -485,6 +485,13 @@ SRE_ENABLED = False
 SRE_SYMBOLS = ["AUDUSD","EURUSD","GBPUSD","NZDUSD","USDCAD","USDCHF",
                "EURGBP","EURJPY","GBPJPY","USDJPY","CADJPY"]
 
+# v15 task-5: SCE — Session Continuation Engine, flag-gated (default OFF).
+# Joins the Asian-range close-through SRE proved shouldn't be faded. Same 11
+# FX pairs and the same M15 requirement as SRE, so it shares the flag-gated
+# M15 preload/fetch below (additive cost only when ON).
+SCE_ENABLED = False
+SCE_SYMBOLS = SRE_SYMBOLS
+
 # v14 task-7: RFE — Relative currency-strength veto, flag-gated (default OFF).
 # Pure logic lives in rfe_strength.py (reviewed in Task 6, consumed verbatim
 # here — never modified). When ON, every CTE/MRE/CBE/HPE signal is vetoed
@@ -526,7 +533,8 @@ for sym in ALL_SYMBOLS:
     # v14 task-5: SRE needs M15 for its 11 FX pairs. FX engines (CTE/MRE/CBE/
     # HPE) never fetched M15 before — additive only, and only paid when the
     # flag is ON (flag-OFF run cost is unchanged from v13).
-    if SRE_ENABLED and sym in SRE_SYMBOLS: tfs += [TF_M15]
+    if (SRE_ENABLED and sym in SRE_SYMBOLS) or (SCE_ENABLED and sym in SCE_SYMBOLS):
+        tfs += [TF_M15]
     preload(sym, tfs)
     print("done")
 time.sleep(3.0)
@@ -553,8 +561,9 @@ for sym in ALL_SYMBOLS:
         m15_count = 99999
         m15=fetch(sym,TF_M15,m15_count)
         entry["M15"] = m15
-    elif SRE_ENABLED and sym in SRE_SYMBOLS:
-        # v14 task-5: SRE scans M15 bar-by-bar like GVE; full history window.
+    elif (SRE_ENABLED and sym in SRE_SYMBOLS) or (SCE_ENABLED and sym in SCE_SYMBOLS):
+        # v14 task-5 / v15 task-5: SRE+SCE scan M15 bar-by-bar like GVE;
+        # full history window.
         m15=fetch(sym,TF_M15,99999)
         entry["M15"] = m15
     else:
@@ -2094,6 +2103,393 @@ if RFE_FILTER:
 else:
     print("  RFE_FILTER=False — skipping (zero vetoes expected this run)")
 print(SEP2)
+
+# ══════════════════════════════════════════════════════════
+#  v15 task-3: IRE — IMBALANCE REBALANCE ENGINE (flag-gated)
+# ══════════════════════════════════════════════════════════
+# Session-agnostic H1 continuation engine (spec 2026-07-07 §3): compression ->
+# displacement -> FVG -> partial rebalance -> continuation, entered ON the
+# rebalance. Pure logic lives in ire_logic.py (TDD'd, task 2), consumed
+# verbatim. Universe = the 11 live FX pairs + XAUUSD + the 5 profiled indices
+# (one shared parameter set — the whitelist decides fit, v14 SRE convention).
+# H1+H4 are always fetched for ALL_SYMBOLS, so unlike SRE_ENABLED this flag
+# has no preload dependency and lives here at its own section.
+IRE_ENABLED = False
+IRE_SYMBOLS = SRE_SYMBOLS + ["XAUUSD"] + INDEX_CANDIDATES
+
+print(f"\n{SEP}")
+print("  RUNNING IRE (Imbalance Rebalance Engine)")
+print(f"  {len(IRE_SYMBOLS)} symbols | H1 displacement->FVG->rebalance | flag={'ON' if IRE_ENABLED else 'OFF'}")
+print(SEP)
+
+if IRE_ENABLED:
+    from ire_logic import (IRE_DEFAULTS, detect_displacement, find_fvg,
+                           rebalance_entry, ire_levels)
+
+    def ire_h1_atr_series(h1, period=14):
+        """H1 ATR(14) full series — same TR construction as sre_m15_atr_series."""
+        h=h1["high"]; l=h1["low"]; pc=h1["close"].shift(1)
+        tr=pd.concat([h-l,(h-pc).abs(),(l-pc).abs()],axis=1).max(axis=1)
+        return tr.ewm(com=period-1,adjust=False).mean()
+
+    # XAUUSD has no CTE profile — derive its IRE profile from the GVE section's
+    # own conventions (pip via get_pip; pip_val/spread formulas from the GVE
+    # section top: pip_val=100*0.01*LOT_GOLD*USD_MYR_RATE, spread=35 pips).
+    # min_fvg: metals convention = 2x spread pips (Silver: MIN_FVG_PIPS_XAGUSD
+    # 10 = 2x its 5-pip spread) -> 70 pips ($7.00 at pip 0.1).
+    _xau_pip = get_pip("XAUUSD")
+    _xau_pv  = 100*0.01*LOT_GOLD*USD_MYR_RATE
+    IRE_XAU_PROFILE = dict(pip=_xau_pip, pip_val_rm=_xau_pv,
+                           spread_rm=35*_xau_pv, min_fvg=70.0)
+
+    IRE_TIMEOUT_BARS = 48   # H1 bars from entry -> exit at close (spec §3.4)
+
+    # cbe_overlap tag: the CBE section has already run (section order), so its
+    # trades are in ALL_TRADES. Precompute per-symbol CBE entry dates once.
+    from datetime import date as _ire_date
+    _cbe_dates = defaultdict(set)
+    for _t in ALL_TRADES:
+        if _t["engine"] == "CBE":
+            _cbe_dates[_t["symbol"]].add(_ire_date.fromisoformat(_t["entry_dt"]))
+
+    ire_all=[]
+    for sym in IRE_SYMBOLS:
+        if sym not in data or data[sym].get("H1") is None:
+            print(f"\n{sym}: SKIPPED — no H1 data"); continue
+        p = IRE_XAU_PROFILE if sym=="XAUUSD" else CTE_PROFILES[sym]
+        pip=p["pip"]; pv=p["pip_val_rm"]; spread_rm=p["spread_rm"]; min_fvg=p["min_fvg"]
+        # SL caps per instrument class (spec §3.4): forex 30 / JPY 40 /
+        # XAUUSD 350 ($35, GVE convention) / index = profile sl_min, which the
+        # v14 probe derived as 4x ATR_M15 in index points.
+        if sym=="XAUUSD":              sl_cap=350.0
+        elif sym in INDEX_CANDIDATES:  sl_cap=float(p["sl_min"])
+        elif "JPY" in sym:             sl_cap=40.0
+        else:                          sl_cap=30.0
+
+        h1a=data[sym]["H1"].reset_index(drop=True)
+        h4a=data[sym]["H4"]
+        atr_series=ire_h1_atr_series(h1a)
+        bars=[{k:float(v) for k,v in b.items()}
+              for b in h1a[["open","high","low","close"]].to_dict("records")]
+        times=h1a["time"]
+        p_cbe=CBE_PROFILES.get(sym)   # None for XAUUSD -> pre_compressed=False
+
+        # IRE-private state ONLY: own trades list, own monthly-loss tracking,
+        # own one-open-position-per-symbol index. Never shared cross-engine.
+        trades=[]; mo_pnl=defaultdict(float)
+        busy_until=-1
+        print(f"\n{sym} (IRE) — scanning {len(bars)} H1 candles...")
+
+        for i in range(IRE_DEFAULTS["structure_bars"], len(bars)-2):
+            if i<=busy_until: continue
+            atr=float(atr_series.iloc[i])
+            if atr<=0: continue
+            d=detect_displacement(bars,i,atr)
+            if d is None: continue
+            direction=d["direction"]
+            g=find_fvg(bars,i,direction,pip,min_fvg)
+            if g is None: continue
+            gap_lo,gap_hi=g
+            start=i+2   # find_fvg needs bar i+1 closed; the wait window starts after it
+            hit=rebalance_entry(bars[start:start+IRE_DEFAULTS["wait_bars"]],
+                                gap_lo,gap_hi,direction,d["origin"],
+                                IRE_DEFAULTS["wait_bars"])
+            if hit is None: continue   # missed window / origin breached — never chase
+            off,entry=hit
+            j=start+off
+            dt=times.iloc[j]; mo=dt.strftime("%Y-%m")
+
+            bal=500+sum(t["pnl_rm"] for t in trades)
+            if mo_pnl[mo]<=-(bal*MAX_MONTHLY_LOSS_PCT/100): continue
+
+            lvls=ire_levels(direction,entry,d["origin"],d["extreme"],pip,atr,sl_cap)
+            if lvls is None: continue
+            sl,tp,sl_pips,tp_pips,rr=lvls
+            sl_pips=round(sl_pips,1); tp_pips=round(tp_pips,1); rr=round(rr,2)
+
+            # Outcome sim: H1 bar-by-bar from the ENTRY bar itself. Entry is
+            # intra-bar at the gap midpoint; the entry bar can still reach TP
+            # but cannot reach SL (rebalance_entry already invalidated any bar
+            # trading through the origin, and SL sits beyond the origin), so
+            # the SL check is skipped only on fi==j. SL-first on later bars;
+            # timeout IRE_TIMEOUT_BARS -> exit at that bar's close.
+            out="timeout"; pp=0.0; ei=j
+            for fi in range(j,min(j+IRE_TIMEOUT_BARS+1,len(bars))):
+                fb=bars[fi]
+                if direction=="BUY":
+                    if fi>j and fb["low"]<=sl:  out="loss"; pp=-sl_pips; ei=fi; break
+                    if fb["high"]>=tp:          out="win";  pp=tp_pips;  ei=fi; break
+                else:
+                    if fi>j and fb["high"]>=sl: out="loss"; pp=-sl_pips; ei=fi; break
+                    if fb["low"]<=tp:           out="win";  pp=tp_pips;  ei=fi; break
+            if out=="timeout":
+                ei=min(j+IRE_TIMEOUT_BARS,len(bars)-1)
+                lp=bars[ei]["close"]
+                pp=round((entry-lp)/pip if direction=="SELL" else (lp-entry)/pip,1)
+                out="win" if pp>0 else "loss" if pp<0 else "be"
+            busy_until=ei   # one open position per symbol
+
+            # ── Tags (measured, not assumed — spec §3 "Measured, not assumed")
+            h_utc=dt.hour
+            sess=("Asian" if h_utc<7 else "London" if h_utc<12
+                  else "NY" if h_utc<20 else "Other")
+            # pre_compressed: did the displacement break out of a CBE-style H4
+            # compression? Reuses cbe_detect_compression with a synthetic last
+            # row whose close = the displacement H1 close, over only FULLY
+            # CLOSED H4 bars before the displacement — no lookahead. Tagged,
+            # NOT required (tests Mahesh's stage-1 hypothesis in the matrix).
+            pre_comp=False
+            if p_cbe is not None:
+                disp_t=times.iloc[i]
+                closed=h4a[h4a["time"]+pd.Timedelta(hours=4)<=disp_t]
+                if len(closed)>0:
+                    synth=closed.iloc[[-1]].copy()
+                    synth.loc[:,"close"]=bars[i]["close"]
+                    c_dir,_,_,_=cbe_detect_compression(
+                        pd.concat([closed,synth],ignore_index=True),
+                        pip,p_cbe["min_range"])
+                    pre_comp=(c_dir==direction)
+            # cbe_overlap: a CBE trade on the same symbol within +/-2 days.
+            ed=dt.date()
+            overlap=any(abs((ed-cd).days)<=2 for cd in _cbe_dates.get(sym,()))
+
+            current_balance=500+sum(x["pnl_rm"] for x in trades)
+            peak_balance=max([500]+[500+sum(x["pnl_rm"] for x in trades[:k]) for k in range(len(trades)+1)])
+            current_dd=max(0.0,((peak_balance-current_balance)/peak_balance)*100)
+            risk_pct,risk_mult=kira_dynamic_risk(engine="IRE",regime="REBALANCE",
+                                                  symbol=sym,current_dd=current_dd)
+            pnl_rm=round((pp*pv-spread_rm)*risk_mult,2)
+            exit_dt=times.iloc[min(ei,len(bars)-1)]
+            hold_h=round((exit_dt-dt).total_seconds()/3600,1)
+
+            t={"symbol":sym,"engine":"IRE","regime":"REBALANCE","direction":direction,
+               "grade":"B","entry_dt":str(dt.date()),"month":mo,"year":str(dt.year),
+               "dow":DAYS[dt.weekday()],"session":sess,"hold_hours":hold_h,
+               "sl_pips":sl_pips,"tp_pips":tp_pips,"rr":rr,"outcome":out,
+               "pnl_pips":pp,"pnl_rm":pnl_rm,"risk_pct":risk_pct,"risk_mult":risk_mult,
+               "pre_compressed":pre_comp,"cbe_overlap":overlap}
+            trades.append(t); mo_pnl[mo]+=pnl_rm
+
+        ALL_TRADES.extend(trades); ire_all.extend(trades)
+        if trades:
+            wins=[t for t in trades if t["outcome"]=="win"]
+            n=len(trades); wr=len(wins)/n*100
+            net=sum(t["pnl_rm"] for t in trades)
+            n_mo=len(set(t["month"] for t in trades))
+            flag="✅" if net>0 else "❌"
+            print(f"  → {n} signals | WR {wr:.1f}% | Net RM{net:+.2f} | {n/n_mo:.1f}/month {flag}")
+        else:
+            print(f"  → 0 signals")
+
+    # ── IRE tag breakdowns (spec §3: PF by session; pre_compressed vs not;
+    #    cbe_overlap vs independent — cannibalization becomes a number).
+    def _ire_pf(ts):
+        w=sum(t["pnl_rm"] for t in ts if t["pnl_rm"]>0)
+        l=abs(sum(t["pnl_rm"] for t in ts if t["pnl_rm"]<0))
+        return round(w/l,2) if l>0 else 99.0
+    if ire_all:
+        print(f"\n  IRE aggregate: {len(ire_all)} trades | "
+              f"net RM{sum(t['pnl_rm'] for t in ire_all):+.2f} | PF {_ire_pf(ire_all)}")
+        for tag,label in (("session","BY SESSION"),
+                          ("pre_compressed","BY PRE-COMPRESSION"),
+                          ("cbe_overlap","BY CBE OVERLAP")):
+            print(f"  IRE {label}:")
+            for val in sorted(set(t[tag] for t in ire_all),key=str):
+                sub=[t for t in ire_all if t[tag]==val]
+                print(f"    {str(val):8} n={len(sub):4} "
+                      f"net RM{sum(t['pnl_rm'] for t in sub):+9.2f} PF {_ire_pf(sub)}")
+else:
+    print("  IRE_ENABLED=False — skipping (zero IRE rows expected this run)")
+
+# ══════════════════════════════════════════════════════════
+#  v15 task-5: SCE — SESSION CONTINUATION ENGINE (flag-gated)
+# ══════════════════════════════════════════════════════════
+# Joins the Asian-range CLOSE-THROUGH that SRE's 2,290-trade fade experiment
+# proved shouldn't be faded (spec 2026-07-07 §4). Reuses SRE's audited
+# scaffolding verbatim: asian_range, KZ hour gates, ATR regime filter, one
+# trade per symbol per KZ per day, engine-private state. Detection is
+# sce_logic.classify_breakout — the exact complement of classify_sweep, so
+# signal overlap with the benched SRE is zero by construction. Prior-day
+# pools are NOT used in v1 (the measured-move TP needs the Asian range
+# specifically). SCE_ENABLED is declared near SRE_ENABLED (preload/fetch
+# pull M15 for the 11 FX pairs only when ON); restated here as banner only.
+print(f"\n{SEP}")
+print("  RUNNING SCE (Session Continuation Engine)")
+print(f"  11 FX pairs | Asian-range close-through, measured move | flag={'ON' if SCE_ENABLED else 'OFF'}")
+print(SEP)
+
+if SCE_ENABLED:
+    from sce_logic import SCE_DEFAULTS, classify_breakout, sce_levels
+
+    for sym in SCE_SYMBOLS:
+        if sym not in data or data[sym].get("M15") is None:
+            print(f"\n{sym}: SKIPPED — no M15 data"); continue
+        p=CTE_PROFILES[sym]; pip=p["pip"]; pv=p["pip_val_rm"]
+        is_jpy_sym=("JPY" in sym)
+        min_break=(SCE_DEFAULTS["min_break_pips_jpy"] if is_jpy_sym
+                   else SCE_DEFAULTS["min_break_pips_fx"])
+        sl_cap=(SCE_DEFAULTS["sl_max_pips_jpy"] if is_jpy_sym
+                else SCE_DEFAULTS["sl_max_pips_fx"])
+
+        # SCE-private state ONLY — never shared with any other engine.
+        trades=[]
+        last_trade_date_by_window=defaultdict(lambda:None)
+        mo_pnl=defaultdict(float)
+        m15a=data[sym]["M15"]
+        print(f"\n{sym} (SCE) — scanning {len(m15a)} M15 candles...")
+
+        atr_series=sre_m15_atr_series(m15a)
+
+        m15a=m15a.reset_index(drop=True)
+        dates=m15a["time"].dt.date
+        unique_dates=dates.drop_duplicates().tolist()
+        day_start_idx_map={}
+        for _di, _date in enumerate(unique_dates):
+            day_start_idx_map[_date]=int((dates==_date).idxmax())
+
+        # ATR regime gate history — same construction as SRE's (day's Asian-
+        # window mean ATR vs its own trailing 20-day mean, dead/hyper bounds
+        # from SRE_DEFAULTS — the audited [0.6, 2.5] scaffolding).
+        daily_asian_atr=[]
+
+        for day_i, cur_date in enumerate(unique_dates):
+            if cur_date.weekday()>=5 or cur_date.weekday()==4:
+                continue
+            day_start_idx=day_start_idx_map[cur_date]
+            window_df=m15a.iloc[day_start_idx:day_start_idx+28]
+            if len(window_df)<20:
+                continue
+            window_bars=window_df[["open","high","low","close"]].to_dict("records")
+            rng=asian_range(window_bars, 0)
+            if rng is None:
+                continue
+            asian_high,asian_low=rng
+
+            window_end_idx=min(day_start_idx+28,len(m15a))
+            day_atr_mean=float(atr_series.iloc[day_start_idx:window_end_idx].mean())
+            if len(daily_asian_atr)>=20:
+                avg_20=sum(v for _,v in daily_asian_atr[-20:])/20
+                if avg_20>0:
+                    ratio=day_atr_mean/avg_20
+                    if ratio<SRE_DEFAULTS["atr_dead_ratio"] or ratio>SRE_DEFAULTS["atr_hyper_ratio"]:
+                        daily_asian_atr.append((cur_date,day_atr_mean))
+                        continue
+            daily_asian_atr.append((cur_date,day_atr_mean))
+
+            for kz_name,kz_start,kz_end,sess_label in (
+                ("London",LONDON_KZ_START,LONDON_KZ_END,"London_KZ"),
+                ("NY",NY_KZ_START,NY_KZ_END,"NY_KZ")):
+                window_key=(sym,kz_name)
+                if last_trade_date_by_window[window_key]==cur_date:
+                    continue  # max ONE trade per symbol per KZ window per day
+
+                kz_mask=(m15a["time"].dt.date==cur_date) & \
+                        (m15a["time"].dt.hour>=kz_start) & (m15a["time"].dt.hour<kz_end)
+                kz_idx=m15a.index[kz_mask].tolist()
+                if not kz_idx:
+                    continue
+
+                traded_this_window=False
+                for i in kz_idx:
+                    if traded_this_window:
+                        break
+                    bar_row=m15a.iloc[i]
+                    bar={"open":float(bar_row["open"]),"high":float(bar_row["high"]),
+                         "low":float(bar_row["low"]),"close":float(bar_row["close"])}
+
+                    brk=classify_breakout(bar,asian_high,asian_low,pip,
+                                          min_break,SCE_DEFAULTS["min_body"])
+                    if brk is None:
+                        continue
+                    direction="BUY" if brk=="BREAK_UP" else "SELL"
+
+                    dt=bar_row["time"]
+                    mo=dt.strftime("%Y-%m")
+                    bal=500+sum(t["pnl_rm"] for t in trades)
+                    if mo_pnl[mo]<=-(bal*MAX_MONTHLY_LOSS_PCT/100):
+                        continue
+
+                    entry=round(float(bar_row["close"]),5)
+                    atr_m15=float(atr_series.iloc[i])
+                    if atr_m15<=0:
+                        continue
+                    lvls=sce_levels(direction,entry,asian_high,asian_low,
+                                    pip,atr_m15,sl_cap)
+                    if lvls is None:
+                        continue
+                    sl,tp,sl_pips,tp_pips,rr=lvls
+                    sl_pips=round(sl_pips,1); tp_pips=round(tp_pips,1); rr=round(rr,2)
+
+                    # Outcome sim: SRE's audited SL-first pattern from the bar
+                    # AFTER the breakout bar (entry is that bar's close);
+                    # timeout = end of THIS session + 8h -> exit at close.
+                    session_end_dt=pd.Timestamp(cur_date,tz="UTC")+pd.Timedelta(hours=kz_end)
+                    timeout_dt=session_end_dt+pd.Timedelta(hours=8)
+
+                    out="timeout"; pp=0.0; ei=i
+                    for fi in range(i+1,len(m15a)):
+                        fc=m15a.iloc[fi]
+                        if fc["time"]>timeout_dt:
+                            break
+                        if direction=="SELL":
+                            if fc["high"]>=sl: out="loss"; pp=-sl_pips; ei=fi; break
+                            if fc["low"] <=tp: out="win";  pp=tp_pips;  ei=fi; break
+                        else:
+                            if fc["low"] <=sl: out="loss"; pp=-sl_pips; ei=fi; break
+                            if fc["high"]>=tp: out="win";  pp=tp_pips;  ei=fi; break
+                    if out=="timeout":
+                        to_idx=m15a.index[(m15a.index>i)&(m15a["time"]<=timeout_dt)]
+                        ei=int(to_idx.max()) if len(to_idx)>0 else i
+                        lp=float(m15a.iloc[ei]["close"])
+                        pp=round((entry-lp)/pip if direction=="SELL" else (lp-entry)/pip,1)
+                        out="win" if pp>0 else "loss" if pp<0 else "be"
+
+                    current_balance=500+sum(x["pnl_rm"] for x in trades)
+                    peak_balance=max([500]+[500+sum(x["pnl_rm"] for x in trades[:k]) for k in range(len(trades)+1)])
+                    current_dd=max(0.0,((peak_balance-current_balance)/peak_balance)*100)
+                    risk_pct,risk_mult=kira_dynamic_risk(engine="SCE",regime="CONTINUATION",
+                                                          symbol=sym,current_dd=current_dd)
+
+                    pnl_rm=round((pp*pv-p["spread_rm"])*risk_mult,2)
+                    exit_dt=m15a.iloc[min(ei,len(m15a)-1)]["time"]
+                    hold_h=round((exit_dt-dt).total_seconds()/3600,1)
+
+                    t={"symbol":sym,"engine":"SCE","regime":"CONTINUATION","direction":direction,
+                       "grade":"B","entry_dt":str(dt.date()),"month":mo,"year":str(dt.year),
+                       "dow":DAYS[dt.weekday()],"session":sess_label,"hold_hours":hold_h,
+                       "sl_pips":sl_pips,"tp_pips":tp_pips,"rr":rr,"outcome":out,
+                       "pnl_pips":pp,"pnl_rm":pnl_rm,"risk_pct":risk_pct,"risk_mult":risk_mult}
+                    trades.append(t); mo_pnl[mo]+=pnl_rm
+                    last_trade_date_by_window[window_key]=cur_date
+                    traded_this_window=True
+
+        ALL_TRADES.extend(trades)
+        if trades:
+            wins=[t for t in trades if t["outcome"]=="win"]
+            n=len(trades); wr=len(wins)/n*100
+            net=sum(t["pnl_rm"] for t in trades)
+            n_mo=len(set(t["month"] for t in trades))
+            flag="✅" if net>0 else "❌"
+            print(f"  → {n} signals | WR {wr:.1f}% | Net RM{net:+.2f} | {n/n_mo:.1f}/month {flag}")
+        else:
+            print(f"  → 0 signals")
+
+    # ── SCE per-KZ split (spec §4: trades tagged with KZ window).
+    _sce_all=[t for t in ALL_TRADES if t["engine"]=="SCE"]
+    if _sce_all:
+        def _sce_pf(ts):
+            w=sum(t["pnl_rm"] for t in ts if t["pnl_rm"]>0)
+            l=abs(sum(t["pnl_rm"] for t in ts if t["pnl_rm"]<0))
+            return round(w/l,2) if l>0 else 99.0
+        print(f"\n  SCE aggregate: {len(_sce_all)} trades | "
+              f"net RM{sum(t['pnl_rm'] for t in _sce_all):+.2f} | PF {_sce_pf(_sce_all)}")
+        for kz in ("London_KZ","NY_KZ"):
+            sub=[t for t in _sce_all if t["session"]==kz]
+            if sub:
+                print(f"    {kz:10} n={len(sub):4} "
+                      f"net RM{sum(t['pnl_rm'] for t in sub):+9.2f} PF {_sce_pf(sub)}")
+else:
+    print("  SCE_ENABLED=False — skipping (zero SCE rows expected this run)")
 
 # ══════════════════════════════════════════════════════════
 #  REPORT

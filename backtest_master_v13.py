@@ -106,6 +106,67 @@ print(f"\nConnected: {acct.login} | Balance: ${acct.balance:.2f}")
 #  PROFILES — all symbols, all engines
 # ══════════════════════════════════════════════════════════
 
+# ── v16: FX-CROSS CANDIDATE UNIVERSE (spec 2026-07-08) ────────
+# 17 non-USD FX crosses added as candidates across CTE/MRE/CBE/HPE/IRE.
+# pip_val_rm is IRON-RULE derived from live MT5 tick data (probe 8 Jul 2026:
+# tick_value x pip/tick_size x 0.01 lot x USD_MYR) — NOT assumed. Crosses'
+# pip value varies by quote currency (that's why each is distinct). Spreads
+# are CONSERVATIVE (~2-3x the liquid-hours probe reading) to bias against
+# false promotion. The profile sanity gate re-checks every generated profile.
+CROSS_PIPVAL = {   # tick-derived, RM per pip at 0.01 lot
+    "AUDCAD":0.2804,"AUDCHF":0.4931,"AUDJPY":0.2458,"AUDNZD":0.2262,
+    "CADCHF":0.4931,"CHFJPY":0.2458,"EURAUD":0.2760,"EURCAD":0.2804,
+    "EURCHF":0.4931,"EURNZD":0.2262,"GBPAUD":0.2760,"GBPCAD":0.2804,
+    "GBPCHF":0.4931,"GBPNZD":0.2262,"NZDCAD":0.2804,"NZDCHF":0.4931,
+    "NZDJPY":0.2458,
+}
+CROSS_SPREAD_PIPS = {   # conservative fixed estimate per symbol
+    "AUDCAD":2.0,"AUDCHF":2.0,"AUDJPY":2.0,"AUDNZD":2.5,"CADCHF":2.5,
+    "CHFJPY":2.0,"EURAUD":2.0,"EURCAD":1.8,"EURCHF":1.5,"EURNZD":3.0,
+    "GBPAUD":3.0,"GBPCAD":2.5,"GBPCHF":2.5,"GBPNZD":3.5,"NZDCAD":2.5,
+    "NZDCHF":2.5,"NZDJPY":2.0,
+}
+CROSS_SYMBOLS = list(CROSS_PIPVAL.keys())
+def _is_cross_jpy(s): return s.endswith("JPY")
+
+def _cross_cte(sym):
+    pv=CROSS_PIPVAL[sym]; spr=CROSS_SPREAD_PIPS[sym]; jpy=_is_cross_jpy(sym)
+    if jpy:
+        return dict(pip=0.01, pip_val_rm=pv, sl_min=120,
+                    vp_prox_pct=0.5, vp_prox_fixed=None, vp_lookback=40,
+                    min_fvg=20.0, spread_rm=spr*pv*0.01,
+                    s_start=SESSION_START_UTC, s_end=SESSION_END_UTC,
+                    atr_thresh=ATR_REGIME_THRESH, block_london=False,
+                    label="JPY-Cross", block_sessions=["Other"])
+    return dict(pip=0.0001, pip_val_rm=pv, sl_min=SL_MIN_FOREX,
+                vp_prox_pct=None, vp_prox_fixed=VP_PROXIMITY_FOREX,
+                vp_lookback=VP_LOOKBACK_DEFAULT, min_fvg=MIN_FVG_PIPS_FOREX,
+                spread_rm=spr*pv*0.01,
+                s_start=SESSION_START_UTC, s_end=SESSION_END_UTC,
+                atr_thresh=ATR_REGIME_THRESH, block_london=True,
+                label="Forex", block_sessions=["NY_PM"])
+def _cross_mre(sym):
+    pv=CROSS_PIPVAL[sym]; spr=CROSS_SPREAD_PIPS[sym]; jpy=_is_cross_jpy(sym)
+    if jpy:
+        return dict(pip=0.01, pip_val_rm=pv, min_range=MRE_MIN_RANGE_JPY,
+                    extreme_prox=MRE_EXTREME_PROX_JPY, sl_beyond=MRE_SL_BEYOND_JPY,
+                    spread_rm=spr*pv*0.01)
+    return dict(pip=0.0001, pip_val_rm=pv, min_range=MRE_MIN_RANGE_FOREX,
+                extreme_prox=MRE_EXTREME_PROX_FOREX, sl_beyond=MRE_SL_BEYOND_PIPS,
+                spread_rm=spr*pv*0.01)
+def _cross_cbe(sym):
+    pv=CROSS_PIPVAL[sym]; spr=CROSS_SPREAD_PIPS[sym]; jpy=_is_cross_jpy(sym)
+    pip=0.01 if jpy else 0.0001
+    mr=CBE_MIN_RANGE_JPY if jpy else CBE_MIN_RANGE_FOREX
+    return dict(pip=pip, pip_val_rm=pv, min_range=mr, spread_rm=spr*pv*0.01)
+def _cross_hpe(sym):
+    pv=CROSS_PIPVAL[sym]; spr=CROSS_SPREAD_PIPS[sym]; jpy=_is_cross_jpy(sym)
+    if jpy:
+        return dict(pip=0.01, pip_val_rm=pv, prox=120, sl_buf=HPE_SL_BEYOND_JPY,
+                    spread_rm=spr*pv*0.01)
+    return dict(pip=0.0001, pip_val_rm=pv, prox=50, sl_buf=HPE_SL_BEYOND_FOREX,
+                spread_rm=spr*pv*0.01)
+
 # CTE profiles — extended to all 8 non-gold symbols
 CTE_PROFILES = {
     "AUDUSD": dict(pip=0.0001, pip_val_rm=0.10*USD_MYR_RATE, sl_min=SL_MIN_FOREX,
@@ -261,15 +322,18 @@ CTE_PROFILES = {
 INDEX_CANDIDATES = ["US500", "US30M", "USTECH100M", "UK100", "DE40"]  # v14 task-3
 
 V13_CANDIDATES = {
-    "CTE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"] + INDEX_CANDIDATES,
-    "MRE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"] + INDEX_CANDIDATES,
-    "CBE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY"] + INDEX_CANDIDATES,   # XAGUSD: HARD BLOCKED
-    "HPE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"] + INDEX_CANDIDATES,
+    "CTE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"] + INDEX_CANDIDATES + CROSS_SYMBOLS,   # v16: +17 FX crosses
+    "MRE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"] + INDEX_CANDIDATES + CROSS_SYMBOLS,   # v16
+    "CBE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY"] + INDEX_CANDIDATES + CROSS_SYMBOLS,   # XAGUSD: HARD BLOCKED | v16
+    "HPE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"] + INDEX_CANDIDATES + CROSS_SYMBOLS,   # v16
     "GVE": ["XAGUSD"],
 }
 def v13_allowed(engine, symbol):
     return engine_symbol_allowed(engine, symbol) or symbol in V13_CANDIDATES.get(engine, [])
 
+# v16: inject the 15 genuinely-new FX crosses (AUDJPY/NZDJPY already profiled —
+# `if s not in` preserves their tuned profiles + byte-stability of prior rows).
+CTE_PROFILES.update({s:_cross_cte(s) for s in CROSS_SYMBOLS if s not in CTE_PROFILES})
 # v9 PRECISION: only whitelisted CTE symbols scan
 CONT_SYMBOLS = [s for s in CTE_PROFILES.keys() if v13_allowed("CTE", s)]
 GVE_SYMBOL   = "XAUUSD"
@@ -360,6 +424,7 @@ MRE_PROFILES = {
                    sl_beyond=16.3,  # 0.5x ATR_M15 32.5
                    spread_rm=0.5*0.0455*0.01),
 }
+MRE_PROFILES.update({s:_cross_mre(s) for s in CROSS_SYMBOLS if s not in MRE_PROFILES})   # v16
 MRE_SYMS = [s for s in MRE_PROFILES.keys() if v13_allowed("MRE", s)]
 
 # CBE profiles — test all symbols
@@ -413,6 +478,7 @@ CBE_PROFILES = {
                    min_range=162.5,  # 5x ATR_M15 32.5
                    spread_rm=0.5*0.0455*0.01),
 }
+CBE_PROFILES.update({s:_cross_cbe(s) for s in CROSS_SYMBOLS if s not in CBE_PROFILES})   # v16
 CBE_SYMS = [s for s in CBE_PROFILES.keys() if v13_allowed("CBE", s)]
 
 # HPE profiles — test all symbols
@@ -467,6 +533,7 @@ HPE_PROFILES = {
                    prox=97.5, sl_buf=32.5,  # 3x / 1x ATR_M15 32.5
                    spread_rm=0.5*0.0455*0.01),
 }
+HPE_PROFILES.update({s:_cross_hpe(s) for s in CROSS_SYMBOLS if s not in HPE_PROFILES})   # v16
 HPE_SYMS = [s for s in HPE_PROFILES.keys() if v13_allowed("HPE", s)]
 
 # v13: ALL_SYMBOLS must only include candidates that HAVE profiles (Tasks 4-5
@@ -2115,7 +2182,7 @@ print(SEP2)
 # H1+H4 are always fetched for ALL_SYMBOLS, so unlike SRE_ENABLED this flag
 # has no preload dependency and lives here at its own section.
 IRE_ENABLED = False
-IRE_SYMBOLS = SRE_SYMBOLS + ["XAUUSD"] + INDEX_CANDIDATES
+IRE_SYMBOLS = SRE_SYMBOLS + ["XAUUSD"] + INDEX_CANDIDATES + CROSS_SYMBOLS   # v16: +FX crosses
 
 print(f"\n{SEP}")
 print("  RUNNING IRE (Imbalance Rebalance Engine)")

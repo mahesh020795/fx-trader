@@ -485,6 +485,18 @@ SRE_ENABLED = False
 SRE_SYMBOLS = ["AUDUSD","EURUSD","GBPUSD","NZDUSD","USDCAD","USDCHF",
                "EURGBP","EURJPY","GBPJPY","USDJPY","CADJPY"]
 
+# v14 task-7: RFE — Relative currency-strength veto, flag-gated (default OFF).
+# Pure logic lives in rfe_strength.py (reviewed in Task 6, consumed verbatim
+# here — never modified). When ON, every CTE/MRE/CBE/HPE signal is vetoed
+# unless the trade direction aligns with the currency-strength rank gap
+# between the pair's base and quote (see rfe_allows). SRE and GVE are never
+# hooked (SRE stays off per spec; GVE trades gold/silver, not an FX pair, so
+# rfe_allows would fail-open for it anyway — but the brief explicitly scopes
+# the hook to CTE/MRE/CBE/HPE only). Ranks are precomputed once after preload
+# into RFE_RANKS_BY_DAY (see precompute block below) using ONLY H4 closes
+# strictly BEFORE each trading day — no lookahead.
+RFE_FILTER = False
+
 # ── v13: PROFILE SANITY GATE ─────────────────────────────────
 from profile_sanity import check_profile
 _sanity_violations = []
@@ -565,6 +577,70 @@ class _Dummy:
 kira = AgentKIRA(_Dummy())
 DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 ALL_TRADES = []
+
+# ══════════════════════════════════════════════════════════
+#  v14 task-7: RFE — currency-strength ranks, precomputed once
+# ══════════════════════════════════════════════════════════
+# Logic contract consumed verbatim from rfe_strength.py (Task 6, reviewed).
+# Never modify that file — only call into it.
+from rfe_strength import currency_strength, strength_ranks, rfe_allows, RFE_DEFAULTS
+
+RFE_PAIRS = SRE_SYMBOLS  # exactly the 11 FX pairs from spec §4 (same list SRE uses)
+RFE_RANKS_BY_DAY = {}
+rfe_vetoed = defaultdict(int)
+
+if RFE_FILTER:
+    print(f"\n{SEP2}")
+    print("  RFE precompute — currency-strength ranks per trading day")
+    print(SEP2)
+    _lookback = RFE_DEFAULTS["lookback"]
+
+    # Per pair: array of (date, close) for every H4 bar, chronological (fetch
+    # already returns ascending time). day_start_idx[d] = index of the FIRST
+    # H4 bar on/after date d, i.e. the first bar NOT strictly-before d. Slicing
+    # closes[:day_start_idx[d]] therefore yields every H4 close strictly
+    # BEFORE d — this is the no-lookahead guarantee: on trading day d we only
+    # ever see H4 candles that closed on an earlier calendar day.
+    _pair_closes = {}
+    _pair_day_start = {}
+    _all_days = set()
+    for _pair in RFE_PAIRS:
+        if _pair not in data or data[_pair].get("H4") is None:
+            continue
+        _h4 = data[_pair]["H4"].reset_index(drop=True)
+        _closes = _h4["close"].tolist()
+        _dates = _h4["time"].dt.date
+        _unique_dates = _dates.drop_duplicates().tolist()
+        _day_start = {}
+        for _d in _unique_dates:
+            _mask = _dates >= _d
+            # idxmax() on an all-False boolean Series returns 0 (ambiguous
+            # with "found at position 0") — guard explicitly: if no bar is
+            # on/after _d, every bar is strictly before it, so the boundary
+            # is the full length, not 0.
+            _day_start[_d] = int(_mask.idxmax()) if _mask.any() else len(_dates)
+        _pair_closes[_pair] = _closes
+        _pair_day_start[_pair] = _day_start
+        _all_days.update(_unique_dates)
+
+    for _day in sorted(_all_days):
+        _h4_closes_by_pair = {}
+        for _pair in RFE_PAIRS:
+            if _pair not in _pair_closes:
+                continue
+            _closes = _pair_closes[_pair]
+            _day_start = _pair_day_start[_pair]
+            # boundary = index of first bar on/after _day; if _day predates
+            # this pair's own history, every bar is "on/after" -> boundary 0
+            # -> zero closes strictly before -> currency_strength skips it
+            # (len(closes) < lookback+1), which is the correct fail-safe.
+            _boundary = _day_start.get(_day, 0)
+            _closes_before = _closes[:_boundary][-(_lookback + 1):]
+            _h4_closes_by_pair[_pair] = _closes_before
+        _scores = currency_strength(_h4_closes_by_pair, _lookback)
+        RFE_RANKS_BY_DAY[_day] = strength_ranks(_scores)
+
+    print(f"  Built ranks for {len(RFE_RANKS_BY_DAY)} trading days across {len(_pair_closes)}/{len(RFE_PAIRS)} pairs")
 
 # ══════════════════════════════════════════════════════════
 #  V3 INDICATORS — VERBATIM (CTE engine)
@@ -917,6 +993,13 @@ for sym in CONT_SYMBOLS:
         elif NY_KZ_START<=h_utc<NY_KZ_END:       sess="NY_Open"
         elif NY_PM_KZ_START<=h_utc<NY_PM_KZ_END: sess="NY_PM"
         else:                                     sess="Other"
+
+        # v14 task-7: RFE veto — immediately before the detected signal
+        # becomes a trade. rfe_allows fail-opens (returns True) for missing
+        # ranks/non-FX symbols, so this is a no-op on any day RFE_RANKS_BY_DAY
+        # has no entry for.
+        if RFE_FILTER and not rfe_allows(direction, sym, RFE_RANKS_BY_DAY.get(dt.date(), {}), RFE_DEFAULTS["min_gap"]):
+            rfe_vetoed["CTE"] += 1; continue
 
         t={"symbol":sym,"engine":"CTE","regime":regime,"direction":direction,
            "entry_dt":str(dt.date()),"month":mo,"year":str(dt.year),
@@ -1329,6 +1412,14 @@ for sym in MRE_SYMS:
         elif 0              <=h_utc<7:             sess="Tokyo"
         else:                                      sess="Other"
 
+        # v14 task-7: RFE veto — MRE trades mean-reversion, i.e. AGAINST
+        # strength alignment by design. Same hook as every other FX engine;
+        # the A/B report calls out MRE's delta separately per spec §5 since a
+        # currency-momentum veto is a priori more likely to hurt a
+        # counter-trend engine.
+        if RFE_FILTER and not rfe_allows(direction, sym, RFE_RANKS_BY_DAY.get(dt.date(), {}), RFE_DEFAULTS["min_gap"]):
+            rfe_vetoed["MRE"] += 1; continue
+
         t={"symbol":sym,"engine":"MRE","regime":regime,"direction":direction,
            "entry_dt":str(dt.date()),"month":mo,"year":str(dt.year),
            "dow":DAYS[dt.weekday()],"session":sess,"hold_hours":hold_h,
@@ -1485,6 +1576,11 @@ for sym in CBE_SYMS:
         elif NY_KZ_START    <=h_utc<NY_KZ_END:      sess="NY_Open"
         elif NY_PM_KZ_START <=h_utc<NY_PM_KZ_END:   sess="NY_PM"
         else:                                        sess="Other"
+
+        # v14 task-7: RFE veto — immediately before the detected signal
+        # becomes a trade.
+        if RFE_FILTER and not rfe_allows(direction, sym, RFE_RANKS_BY_DAY.get(dt.date(), {}), RFE_DEFAULTS["min_gap"]):
+            rfe_vetoed["CBE"] += 1; continue
 
         t={"symbol":sym,"engine":"CBE","regime":"COMPRESSING","direction":direction,
            "grade":grade,"entry_dt":str(dt.date()),"month":mo,"year":str(dt.year),
@@ -1718,6 +1814,11 @@ for sym in HPE_SYMS:
         elif NY_PM_KZ_START <=h_utc<NY_PM_KZ_END: sess="NY_PM"
         elif 0              <=h_utc<7:             sess="Tokyo"
         else:                                      sess="Other"
+
+        # v14 task-7: RFE veto — immediately before the detected signal
+        # becomes a trade.
+        if RFE_FILTER and not rfe_allows(direction, sym, RFE_RANKS_BY_DAY.get(dt.date(), {}), RFE_DEFAULTS["min_gap"]):
+            rfe_vetoed["HPE"] += 1; continue
 
         t={"symbol":sym,"engine":"HPE","regime":"TRENDING","direction":direction,
            "grade":grade,"entry_dt":str(dt.date()),"month":mo,"year":str(dt.year),
@@ -1979,6 +2080,20 @@ if SRE_ENABLED:
             print(f"  → 0 signals")
 else:
     print("  SRE_ENABLED=False — skipping (zero SRE rows expected this run)")
+
+# ══════════════════════════════════════════════════════════
+#  v14 task-7: RFE VETO SUMMARY
+# ══════════════════════════════════════════════════════════
+print(f"\n{SEP2}")
+print(f"  RFE veto summary | flag={'ON' if RFE_FILTER else 'OFF'}")
+if RFE_FILTER:
+    _total_vetoed = sum(rfe_vetoed.values())
+    for _eng in ("CTE", "MRE", "CBE", "HPE"):
+        print(f"    {_eng}: {rfe_vetoed.get(_eng, 0)} vetoed")
+    print(f"    TOTAL vetoed: {_total_vetoed}")
+else:
+    print("  RFE_FILTER=False — skipping (zero vetoes expected this run)")
+print(SEP2)
 
 # ══════════════════════════════════════════════════════════
 #  REPORT

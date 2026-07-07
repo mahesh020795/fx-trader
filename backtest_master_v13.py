@@ -214,15 +214,57 @@ CTE_PROFILES = {
                    s_start=SESSION_START_UTC, s_end=SESSION_END_UTC,
                    atr_thresh=ATR_REGIME_THRESH, block_london=False, label="Silver",
                    block_sessions=["Other"]),
+    # ── v14 task-3: index candidates (probe 2026-07-06, London-hours addendum) ──
+    # pip=1.0 (1 index point) for all five. pip_val_rm from probe table.
+    # spread_rm = London_spread_price(pips, pip=1.0) x pip_val_rm x 0.01 lot,
+    # same convention as forex/JPY entries above. Sessions = cash-market windows
+    # (US 13-20 UTC, EU 7-15 UTC per brief). min_fvg = 2x ATR_M15, sl_min = 4x ATR_M15.
+    "US500": dict(pip=1.0, pip_val_rm=0.0398, sl_min=26.8,  # 4x ATR_M15 6.7
+                   vp_prox_pct=0.5, vp_prox_fixed=None, vp_lookback=40,
+                   min_fvg=13.4,  # 2x ATR_M15 6.7
+                   spread_rm=0.5*0.0398*0.01,  # London spread 0.5 x pip_val_rm x 0.01
+                   s_start=13, s_end=20,
+                   atr_thresh=ATR_REGIME_THRESH, block_london=False, label="Index",
+                   block_sessions=["Other"]),
+    "US30M": dict(pip=1.0, pip_val_rm=0.00398, sl_min=168.0,  # 4x ATR_M15 42.0
+                   vp_prox_pct=0.5, vp_prox_fixed=None, vp_lookback=40,
+                   min_fvg=84.0,  # 2x ATR_M15 42.0
+                   spread_rm=4.0*0.00398*0.01,  # London spread 4.0 x pip_val_rm x 0.01
+                   s_start=13, s_end=20,
+                   atr_thresh=ATR_REGIME_THRESH, block_london=False, label="Index",
+                   block_sessions=["Other"]),
+    "USTECH100M": dict(pip=1.0, pip_val_rm=0.0398, sl_min=156.4,  # 4x ATR_M15 39.1
+                   vp_prox_pct=0.5, vp_prox_fixed=None, vp_lookback=40,
+                   min_fvg=78.2,  # 2x ATR_M15 39.1
+                   spread_rm=4.5*0.0398*0.01,  # London spread 4.5 x pip_val_rm x 0.01
+                   s_start=13, s_end=20,
+                   atr_thresh=ATR_REGIME_THRESH, block_london=False, label="Index",
+                   block_sessions=["Other"]),
+    "UK100": dict(pip=1.0, pip_val_rm=0.0398, sl_min=44.4,  # 4x ATR_M15 11.1
+                   vp_prox_pct=0.5, vp_prox_fixed=None, vp_lookback=40,
+                   min_fvg=22.2,  # 2x ATR_M15 11.1
+                   spread_rm=1.1*0.0398*0.01,  # London spread 1.1 x pip_val_rm x 0.01
+                   s_start=7, s_end=15,
+                   atr_thresh=ATR_REGIME_THRESH, block_london=False, label="Index",
+                   block_sessions=["Other"]),
+    "DE40": dict(pip=1.0, pip_val_rm=0.0455, sl_min=130.0,  # 4x ATR_M15 32.5
+                   vp_prox_pct=0.5, vp_prox_fixed=None, vp_lookback=40,
+                   min_fvg=65.0,  # 2x ATR_M15 32.5
+                   spread_rm=0.5*0.0455*0.01,  # London spread 0.5 x pip_val_rm x 0.01
+                   s_start=7, s_end=15,
+                   atr_thresh=ATR_REGIME_THRESH, block_london=False, label="Index",
+                   block_sessions=["Other"]),
 }
 # ── v13 CANDIDATE MODE ───────────────────────────────────────
 # Symbols under evaluation. NOT in the live whitelist — they scan in this
 # harness only. Promotion to config.py requires spec §7 criteria.
+INDEX_CANDIDATES = ["US500", "US30M", "USTECH100M", "UK100", "DE40"]  # v14 task-3
+
 V13_CANDIDATES = {
-    "CTE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"],
-    "MRE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"],
-    "CBE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY"],   # XAGUSD: HARD BLOCKED
-    "HPE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"],
+    "CTE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"] + INDEX_CANDIDATES,
+    "MRE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"] + INDEX_CANDIDATES,
+    "CBE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY"] + INDEX_CANDIDATES,   # XAGUSD: HARD BLOCKED
+    "HPE": ["USDCHF", "EURGBP", "AUDJPY", "CADJPY", "NZDJPY", "XAGUSD"] + INDEX_CANDIDATES,
     "GVE": ["XAGUSD"],
 }
 def v13_allowed(engine, symbol):
@@ -290,6 +332,33 @@ MRE_PROFILES = {
     "XAGUSD": dict(pip=0.001, pip_val_rm=0.0199,
                    min_range=75, extreme_prox=MRE_EXTREME_PROX_JPY,
                    sl_beyond=MRE_SL_BEYOND_JPY, spread_rm=5.0*0.0199),
+    # ── v14 task-3: index candidates ── min_range=10x ATR_M15, extreme_prox=1x
+    # ATR_M15, sl_beyond=0.5x ATR_M15. spread_rm = London spread x pip_val_rm x 0.01.
+    "US500": dict(pip=1.0, pip_val_rm=0.0398,
+                   min_range=67.0,  # 10x ATR_M15 6.7
+                   extreme_prox=6.7,  # 1x ATR_M15 6.7
+                   sl_beyond=3.4,  # 0.5x ATR_M15 6.7
+                   spread_rm=0.5*0.0398*0.01),
+    "US30M": dict(pip=1.0, pip_val_rm=0.00398,
+                   min_range=420.0,  # 10x ATR_M15 42.0
+                   extreme_prox=42.0,  # 1x ATR_M15 42.0
+                   sl_beyond=21.0,  # 0.5x ATR_M15 42.0
+                   spread_rm=4.0*0.00398*0.01),
+    "USTECH100M": dict(pip=1.0, pip_val_rm=0.0398,
+                   min_range=391.0,  # 10x ATR_M15 39.1
+                   extreme_prox=39.1,  # 1x ATR_M15 39.1
+                   sl_beyond=19.6,  # 0.5x ATR_M15 39.1
+                   spread_rm=4.5*0.0398*0.01),
+    "UK100": dict(pip=1.0, pip_val_rm=0.0398,
+                   min_range=111.0,  # 10x ATR_M15 11.1
+                   extreme_prox=11.1,  # 1x ATR_M15 11.1
+                   sl_beyond=5.6,  # 0.5x ATR_M15 11.1
+                   spread_rm=1.1*0.0398*0.01),
+    "DE40": dict(pip=1.0, pip_val_rm=0.0455,
+                   min_range=325.0,  # 10x ATR_M15 32.5
+                   extreme_prox=32.5,  # 1x ATR_M15 32.5
+                   sl_beyond=16.3,  # 0.5x ATR_M15 32.5
+                   spread_rm=0.5*0.0455*0.01),
 }
 MRE_SYMS = [s for s in MRE_PROFILES.keys() if v13_allowed("MRE", s)]
 
@@ -326,6 +395,23 @@ CBE_PROFILES = {
     # CBE compression breakout logic fires on Silver volatility spikes, not real compressions
     # HARD BLOCKED from live trading until dedicated Silver CBE calibration
     # "XAGUSD": dict(pip=0.001, ...)  ← DO NOT re-enable without full investigation
+    # ── v14 task-3: index candidates ── min_range = 5x ATR_M15.
+    # spread_rm = London spread x pip_val_rm x 0.01.
+    "US500": dict(pip=1.0, pip_val_rm=0.0398,
+                   min_range=33.5,  # 5x ATR_M15 6.7
+                   spread_rm=0.5*0.0398*0.01),
+    "US30M": dict(pip=1.0, pip_val_rm=0.00398,
+                   min_range=210.0,  # 5x ATR_M15 42.0
+                   spread_rm=4.0*0.00398*0.01),
+    "USTECH100M": dict(pip=1.0, pip_val_rm=0.0398,
+                   min_range=195.5,  # 5x ATR_M15 39.1
+                   spread_rm=4.5*0.0398*0.01),
+    "UK100": dict(pip=1.0, pip_val_rm=0.0398,
+                   min_range=55.5,  # 5x ATR_M15 11.1
+                   spread_rm=1.1*0.0398*0.01),
+    "DE40": dict(pip=1.0, pip_val_rm=0.0455,
+                   min_range=162.5,  # 5x ATR_M15 32.5
+                   spread_rm=0.5*0.0455*0.01),
 }
 CBE_SYMS = [s for s in CBE_PROFILES.keys() if v13_allowed("CBE", s)]
 
@@ -363,6 +449,23 @@ HPE_PROFILES = {
     # MT5 contract (see CTE entry above for derivation).
     "XAGUSD": dict(pip=0.001, pip_val_rm=0.0199,
                    prox=300, sl_buf=50, spread_rm=5.0*0.0199),
+    # ── v14 task-3: index candidates ── prox=3x ATR_M15, sl_buf=1x ATR_M15.
+    # spread_rm = London spread x pip_val_rm x 0.01.
+    "US500": dict(pip=1.0, pip_val_rm=0.0398,
+                   prox=20.1, sl_buf=6.7,  # 3x / 1x ATR_M15 6.7
+                   spread_rm=0.5*0.0398*0.01),
+    "US30M": dict(pip=1.0, pip_val_rm=0.00398,
+                   prox=126.0, sl_buf=42.0,  # 3x / 1x ATR_M15 42.0
+                   spread_rm=4.0*0.00398*0.01),
+    "USTECH100M": dict(pip=1.0, pip_val_rm=0.0398,
+                   prox=117.3, sl_buf=39.1,  # 3x / 1x ATR_M15 39.1
+                   spread_rm=4.5*0.0398*0.01),
+    "UK100": dict(pip=1.0, pip_val_rm=0.0398,
+                   prox=33.3, sl_buf=11.1,  # 3x / 1x ATR_M15 11.1
+                   spread_rm=1.1*0.0398*0.01),
+    "DE40": dict(pip=1.0, pip_val_rm=0.0455,
+                   prox=97.5, sl_buf=32.5,  # 3x / 1x ATR_M15 32.5
+                   spread_rm=0.5*0.0455*0.01),
 }
 HPE_SYMS = [s for s in HPE_PROFILES.keys() if v13_allowed("HPE", s)]
 

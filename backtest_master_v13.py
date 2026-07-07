@@ -1397,8 +1397,8 @@ for sym in MRE_SYMS:
         current_dd = max(0.0, ((peak_balance - current_balance) / peak_balance) * 100)
 
         risk_pct, risk_mult = kira_dynamic_risk(
-            engine="GVE",
-            regime=regime,
+            engine="MRE",
+            regime="RANGING",
             symbol=sym,
             current_dd=current_dd
         )
@@ -1562,8 +1562,8 @@ for sym in CBE_SYMS:
         current_dd = max(0.0, ((peak_balance - current_balance) / peak_balance) * 100)
 
         risk_pct, risk_mult = kira_dynamic_risk(
-            engine="MRE",
-            regime=regime,
+            engine="CBE",
+            regime="COMPRESSING",
             symbol=sym,
             current_dd=current_dd
         )
@@ -1800,7 +1800,7 @@ for sym in HPE_SYMS:
         current_dd = max(0.0, ((peak_balance - current_balance) / peak_balance) * 100)
 
         risk_pct, risk_mult = kira_dynamic_risk(
-            engine="CBE",
+            engine="HPE",
             regime=regime,
             symbol=sym,
             current_dd=current_dd

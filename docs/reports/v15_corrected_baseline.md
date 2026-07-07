@@ -1,4 +1,58 @@
-# v13 Compatibility Matrix
+# v15 Corrected Baseline — Harness Risk-Label Fix (Task 1)
+
+**Date:** 7 July 2026 | **Run:** `.superpowers/sdd/v15_task1_run.log` (full run, corrected harness)
+**Fix commit:** see git log (backtest_master_v13.py)
+
+## What was fixed
+
+`kira_dynamic_risk(engine=, regime=)` call sites carried a copy-paste chain shifted
+one engine over, present since ~v10. Labels select risk multipliers via the SCORES
+tables, so three engines were sized under the wrong engine's risk profile:
+
+| Section (line) | Passed before | Passed after | Status |
+|---|---|---|---|
+| CTE (~981) | `"CTE"`, `regime` var | unchanged | already correct |
+| XAGUSD-GVE (~1214) | `"GVE","GVE"` literal | unchanged | verified correct |
+| MRE (~1399) | **`"GVE"`**, `regime` var | `"MRE"`, `"RANGING"` | FIXED |
+| CBE (~1564) | **`"MRE"`**, `regime` var | `"CBE"`, `"COMPRESSING"` | FIXED |
+| HPE (~1802) | **`"CBE"`**, `regime` var | `"HPE"`, `regime` var | FIXED |
+| SRE (~2055) | `"SRE","STOP_RUN"` literal | unchanged | verified correct |
+
+`kira_dynamic_risk` itself and the SCORES tables were NOT changed.
+
+## Count-identity gate: PASS
+
+`risk_mult` is used only in `pnl_rm = (pips × pipval − spread) × risk_mult`, applied
+after signal detection and outcome simulation — labels cannot change trade counts.
+Verified against the pre-fix trade list (`.superpowers/sdd/task7_runA_trades.json`,
+v14 Task 7 Run A): 606 → 605 trades, the ONLY difference being CBE×AUDUSD's oldest
+trade (2022-09-06) falling off the count-capped H1 rolling window between run times
+(same effect as the documented v14 CBE×NZDJPY 18→17 drift). Zero other count changes
+across all 55 engine×symbol rows.
+
+## The rebase — how much the label bug distorted history
+
+Per-engine (all trades incl. XAGUSD analysis rows):
+
+| Engine | n (pre→post) | Net RM pre | Net RM post | Delta | Cause |
+|---|---|---|---|---|---|
+| CBE | 305→304 | 3,021.92 | 3,615.63 | **+593.71** | was billed as MRE (under-sized) |
+| CTE | 101 | 445.56 | 445.56 | 0.00 | label was correct |
+| GVE | 42 | 1,011.40 | 1,011.40 | 0.00 | label was correct |
+| HPE | 15 | 181.28 | 167.74 | −13.54 | was billed as CBE |
+| MRE | 143 | 642.71 | 436.67 | **−206.04** | was billed as GVE (over-sized) |
+| **Total** | 606→605 | **5,302.87** | **5,677.00** | **+374.13** | |
+
+Clean portfolio (XAGUSD excluded): 592→591 signals, WR 44.9%→45.0%,
+net **RM+5,282.48 → RM+5,655.69**, PF **1.94 → 2.00**, Sharpe **2.27 → 2.33**,
+max DD **21.4% → 16.3%**.
+
+Interpretation: the bug systematically under-sized CBE (the strongest engine) and
+over-sized MRE. All historical per-engine RM comparisons v10–v14 carry this skew;
+verdicts stand (PF/count-based), but RM magnitudes rebase from here. **All v15
+comparisons — including the v12-core benchmark — use this corrected harness only.**
+
+## Corrected compatibility matrix
 
 | engine | symbol | variant | n_trades | wr | net_rm | pf | pf_ex_best | verdict |
 |---|---|---|---|---|---|---|---|---|

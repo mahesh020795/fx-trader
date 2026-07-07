@@ -44,6 +44,11 @@ CANDIDATE_COMBOS = [
     ("EURGBP", "IRE"),
     ("EURUSD", "IRE"),
     ("AUDUSD", "IRE"),
+    # v16: FX-cross matrix-PASS combos (docs/reports/v13_matrix_2026-07-08.md)
+    ("AUDCAD", "CBE"), ("AUDCHF", "CBE"), ("CADCHF", "CBE"), ("EURCAD", "CBE"),
+    ("GBPAUD", "CBE"), ("GBPCAD", "CBE"), ("NZDCHF", "CBE"),
+    ("AUDCAD", "CTE"), ("AUDCHF", "CTE"), ("EURAUD", "CTE"),
+    ("AUDCAD", "MRE"), ("AUDCHF", "MRE"), ("EURAUD", "MRE"),
 ]
 
 def load_trades(path="backtest_master_v13.json"):

@@ -40,6 +40,22 @@ Rejected this round: IRE×GBPUSD (PF 0.66), IRE×NZDUSD (0.42), IRE×USDCHF (1.2
 6. **IRE pre-compression variant**: compression-preceded displacements ran PF 1.80 vs 1.10. A "compression-required" IRE variant is a future A/B (do not adopt from this run's subgroup — v9/v14 lesson).
 7. **v14 tickets 1, 3, 4 still open** (live-HPE divergence; index calibration; CTE-scoped RFE). Ticket 2 (harness label mismatch) CLOSED by v15 Phase 0.
 
+| **v16** | 8 Jul 2026 | **Universe Expansion (FX crosses)** — added 17 non-USD FX crosses to the backtest candidate pool (all engines + IRE), tick-derived pip values, conservative spreads; 68 profiles passed the sanity gate. Matrix: 16 cross combos PASS (in-sample). Walk-forward ROBUST 7/8 (median PF 2.10, OOS whitelist net RM+3,007 vs v15's +2,243). **Promoted 9 combos** clearing matrix-PASS + OOS-majority-fold-positive: **CBE × {AUDCAD, AUDCHF, EURCAD, GBPAUD, GBPCAD, NZDCHF}** + **CTE × {AUDCAD, AUDCHF, EURAUD}** (7 new symbols). Held (50% folds): CBE×CADCHF, MRE×{AUDCAD,EURAUD}. Rejected: cross×engine matrix FAILs (EURNZD/GBPNZD/NZDCAD etc. — spread-eaten or no edge). Benchmark: live universe **27→36 combos**, backtest **372→554 trades (+49% frequency), net RM+5,494→+7,409 (+35%), PF 2.31→2.38** (quality *up*). MC (v15-live vs v16-live): P95 DD 51.3%→43.6%, ruin 3.46%→1.96% — every risk metric improves via diversification. No new engine code (CBE/CTE already live — pure config promotion). Live sizing bug caught+fixed: `get_pip_value_rm` flat forex default was wrong for non-USD-quote crosses (up to 40% mis-size) — added tick-derived CROSS_PIP_VAL_RM. `test_full_system.py` 24/24. Non-FX (metals/indices/crypto) deferred to v17 (ORE) / v18 (crypto breakout). | +9 combos | — | — | — | 43.6% (MC P95) | 2.38 | git tag `v16` |
+
+### v16 promotions (config.py — untracked; recorded here per the config-is-never-committed rule)
+Added to `KIRA_ROUTING_TABLE`, `ENGINE_SYMBOL_WHITELIST` (CTE+CBE), `PAIRS`, `PROBATION_COMBOS`, and `CROSS_PIP_VAL_RM`:
+- **CBE × GBPCAD** — matrix PF 4.24, OOS +RM441 (6/6 folds, perfect). Strongest.
+- **CBE × EURCAD** — matrix PF 3.76, OOS +RM181 (5/6 folds).
+- **CBE × GBPAUD** — matrix PF 3.43, OOS +RM534 (5/7 folds). Biggest net.
+- **CBE × NZDCHF** — matrix PF 3.30, OOS +RM268 (3/5 folds).
+- **CBE × AUDCHF** — matrix PF 2.39, OOS +RM258 (6/8 folds).
+- **CBE × AUDCAD** — matrix PF 1.39, OOS +RM79 (4/6 folds).
+- **CTE × EURAUD** — matrix PF 1.83, OOS +RM52 (4/5 folds).
+- **CTE × AUDCHF** — matrix PF 1.51, OOS +RM54 (4/7 folds).
+- **CTE × AUDCAD** — matrix PF 1.72, OOS +RM48 (4/7 folds).
+
+All 9 on 0.5× probation (`PROBATION_COMBOS`) until 20 closed signals. **To revert:** remove the 7 `# v16` symbols from PAIRS, the 7 routing entries, the CTE/CBE whitelist additions, the 9 PROBATION entries, and `CROSS_PIP_VAL_RM` from config.py; `git checkout v15` for tracked files. Held combos (CBE×CADCHF, MRE×AUDCAD, MRE×EURAUD — 50% OOS folds, net-positive) are candidates for a future round with more data. No live `agent_kira` change (CBE/CTE already ported).
+
 ### v14 open tickets (carried forward)
 1. **Live HPE ≠ backtested HPE**: live `agent_kira._engine_hpe` uses a never-backtested W1-swing design; the validated backtest version uses D1 pivots. Its 4 new config constants are UNVALIDATED placeholders. Either backtest the live design or port the validated one. Until then, live HPE signals are unvalidated.
 2. **Harness engine-label mismatch** (since ~v10): `kira_dynamic_risk(engine=...)` receives wrong engine labels in some loops (e.g. MRE loop passes "GVE") — consistent across all versions so comparisons hold, but fix before v15 harness work.

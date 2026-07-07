@@ -40,6 +40,10 @@ CANDIDATE_COMBOS = [
     ("EURGBP", "CBE"),
     ("AUDJPY", "CBE"),
     ("XAGUSD", "CTE"),
+    # v15 task-6: IRE matrix-PASS combos (docs/reports/v15_matrix_ire.md)
+    ("EURGBP", "IRE"),
+    ("EURUSD", "IRE"),
+    ("AUDUSD", "IRE"),
 ]
 
 def load_trades(path="backtest_master_v13.json"):

@@ -24,6 +24,7 @@ import numpy as np
 import logging
 from datetime import datetime, timezone
 from config import *
+from ire_logic import (IRE_DEFAULTS, detect_displacement, find_fvg, ire_levels)  # v15
 
 logger = logging.getLogger("KIRA")
 
@@ -1510,6 +1511,106 @@ class AgentKIRA:
                     f"{confidence}% retrace={retrace*100:.0f}% SL:{sl_pips}pip TP:{tp_pips}pip R:R 1:{rr}")
         return brief
 
+    # ════════════════════════════════════════════════════════════
+    #  ENGINE: IRE — IMBALANCE REBALANCE (v15, 7 Jul 2026)
+    #  Session-agnostic H1: displacement → FVG → enter the rebalance.
+    #  Pure logic in ire_logic.py — the EXACT module the v15 backtest
+    #  validated (106 trades; promoted: EURGBP PF 3.48, EURUSD 3.10,
+    #  AUDUSD 1.39; all OOS majority-fold-positive; probation 0.5x).
+    #  Stateless: every scan re-derives the setup from H1 history, so
+    #  restarts lose nothing and live semantics mirror the backtest.
+    # ════════════════════════════════════════════════════════════
+
+    def _engine_ire(self, symbol, candles, tick, now_dt=None):
+        h1 = candles.get("H1")
+        if h1 is None: return None
+        d = IRE_DEFAULTS
+        if len(h1) < d["structure_bars"] + d["wait_bars"] + 20: return None
+
+        pip     = get_pip(symbol)
+        pv      = get_pip_value_rm(symbol)
+        min_fvg = IRE_MIN_FVG_JPY if is_jpy(symbol) else MIN_FVG_PIPS_FOREX
+        sl_cap  = IRE_SL_CAP_JPY  if is_jpy(symbol) else IRE_SL_CAP_FOREX
+
+        # Tail window: structure lookback + wait window + ATR warmup.
+        h1v = h1.tail(d["structure_bars"] + d["wait_bars"] + 40).reset_index(drop=True)
+        h_  = h1v["high"]; l_ = h1v["low"]; pc_ = h1v["close"].shift(1)
+        tr_ = pd.concat([h_-l_,(h_-pc_).abs(),(l_-pc_).abs()],axis=1).max(axis=1)
+        atr_series = tr_.ewm(com=13, adjust=False).mean()
+        bars = [{k: float(v) for k, v in b.items()}
+                for b in h1v[["open","high","low","close"]].to_dict("records")]
+        last = len(bars) - 1          # forming bar = "now" (live convention)
+
+        # Newest displacement first; FVG needs bar i+1 CLOSED (i+1 <= last-1).
+        lo = max(d["structure_bars"], last - (d["wait_bars"] + 2))
+        for i in range(last - 2, lo - 1, -1):
+            atr = float(atr_series.iloc[i])
+            if atr <= 0: continue
+            disp = detect_displacement(bars, i, atr)
+            if disp is None: continue
+            direction = disp["direction"]
+            g = find_fvg(bars, i, direction, pip, min_fvg)
+            if g is None: continue
+            gap_lo, gap_hi = g
+            mid   = (gap_lo + gap_hi) / 2.0
+            start = i + 2
+            if last - start >= d["wait_bars"]: continue      # window expired
+
+            # Closed bars since FVG confirm: already consumed or invalidated?
+            consumed = invalid = False
+            for b in bars[start:last]:
+                if direction == "BUY":
+                    if b["low"]  <= disp["origin"]: invalid  = True; break
+                    if b["low"]  <= mid:            consumed = True; break
+                else:
+                    if b["high"] >= disp["origin"]: invalid  = True; break
+                    if b["high"] >= mid:            consumed = True; break
+            if invalid or consumed: continue
+
+            # Live trigger: the FORMING bar entering the gap right now
+            # (backtest enters at gap midpoint when a bar's range touches it).
+            fb = bars[last]
+            if direction == "BUY":
+                if fb["low"]  <= disp["origin"]: continue    # structure failed
+                if fb["low"]  >  mid:            continue    # gap not reached yet
+            else:
+                if fb["high"] >= disp["origin"]: continue
+                if fb["high"] <  mid:            continue
+
+            entry = round(float(h1v.iloc[-1]["close"]), 5)   # house convention
+            lvls = ire_levels(direction, entry, disp["origin"], disp["extreme"],
+                              pip, atr, sl_cap)
+            if lvls is None: continue
+            sl, tp, sl_pips, tp_pips, rr = lvls
+            sl = round(sl, 5); tp = round(tp, 5)
+            sl_pips = round(sl_pips, 1); tp_pips = round(tp_pips, 1); rr = round(rr, 2)
+
+            confidence = IRE_BASE_CONFIDENCE   # flat — no unvalidated boosts
+            grade = "B"
+            lot       = get_lot(symbol)
+            risk_rm   = round(sl_pips * pv * lot / 0.01, 2)
+            profit_rm = round(tp_pips * pv * lot / 0.01, 2)
+
+            brief = {
+                "agent": "KIRA", "engine": "IRE", "regime": "REBALANCE",
+                "symbol": symbol, "direction": direction, "grade": grade,
+                "confidence": confidence, "kira_score": confidence,
+                "entry": entry, "sl": sl, "tp": tp,
+                "sl_pips": sl_pips, "tp_pips": tp_pips, "lot_size": lot,
+                "risk_rm": risk_rm, "profit_rm": profit_rm, "rr": rr,
+                "spread": tick["spread"],
+                "gap_lo": round(gap_lo, 5), "gap_hi": round(gap_hi, 5),
+                "disp_origin": round(disp["origin"], 5),
+                "disp_extreme": round(disp["extreme"], 5),
+                "instrument_type": "jpy" if is_jpy(symbol) else "forex",
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            }
+            logger.info(f"KIRA IRE [REBALANCE]: {direction} {symbol} Grade-{grade} "
+                        f"{confidence}% gap={round((gap_hi-gap_lo)/pip,1)}pip "
+                        f"SL:{sl_pips}pip TP:{tp_pips}pip R:R 1:{rr}")
+            return brief
+        return None
+
         # ════════════════════════════════════════════════════════════
     #  MAIN PIPELINE — KIRA as dispatcher
     #
@@ -1595,6 +1696,8 @@ class AgentKIRA:
             return self._engine_cbe(symbol, candles, tick, now_dt=now_dt)
         elif engine_name == "HPE":
             return self._engine_hpe(symbol, candles, tick, regime, now_dt=now_dt)
+        elif engine_name == "IRE":
+            return self._engine_ire(symbol, candles, tick, now_dt=now_dt)
         else:
             logger.warning(f"Unknown engine name: {engine_name}")
             return None

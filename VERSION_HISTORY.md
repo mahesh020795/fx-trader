@@ -23,6 +23,14 @@ Parameter changes are recorded in this file's notes instead.
 | v12 | 14 Jun 2026 | SAGE self-review agent, Prop Firm Mode in GUARD | 287 | 49.5% | +RM4,192 | 2.53 | 12.6% | 2.19 | git tag `v12` (initial commit) |
 | **v13** | 6 Jul 2026 | **Validated Signal Expansion** — promoted 4 new engine×symbol combos (see notes). Walk-forward ROBUST 5/5 OOS folds (+RM1,839.85 whitelist net, median PF 1.87); Monte Carlo median DD 21.7% / P95 52.6% / ruin 3.83% (all slightly better than v10 baseline via diversification). v10 core unchanged — v13 adds to it. | 287+4 combos | — | — | — | 21.7% (MC med) | — | git tag `v13` |
 
+| **v14** | 7 Jul 2026 | **The Knowledge Version** — four experiments run, four rejections, ZERO promotions (live universe unchanged from v13). SRE (stop-run reversal engine): FAIL, PF 0.92 over 2,290 trades, fairness-audited. Gold crosses (GVE): untradeable, spreads structural at London liquidity. Indices (5 × 4 engines): one PASS on truncated data (CBE UK100), 12/16 combos under-sampled — FX-tuned filters too strict, calibration follow-up recorded. RFE strength filter: FAIL 0/3 (PF 1.94→1.75, net −62%) — rejected globally; CTE-scoped variant (PF 1.71→2.42 subgroup) recorded as future hypothesis requiring its own A/B. Revalidation for the record: walk-forward ROBUST 7/8 OOS folds (median PF 1.91), MC median DD 21.5% / ruin 3.72%. Also: live SIM system started 6 Jul (first time since 11 Jun) on the 12-symbol universe; three latent live bugs fixed (LOT_SIZE NameError, 4 undefined HPE_W1_* constants, false-passing weekly-loss test); live-HPE-vs-backtest-HPE algorithm divergence discovered and ticketed; duplicate-process launch hazard in start_agents.bat documented. | — | — | — | — | — | — | git tag `v14` |
+
+### v14 open tickets (carried forward)
+1. **Live HPE ≠ backtested HPE**: live `agent_kira._engine_hpe` uses a never-backtested W1-swing design; the validated backtest version uses D1 pivots. Its 4 new config constants are UNVALIDATED placeholders. Either backtest the live design or port the validated one. Until then, live HPE signals are unvalidated.
+2. **Harness engine-label mismatch** (since ~v10): `kira_dynamic_risk(engine=...)` receives wrong engine labels in some loops (e.g. MRE loop passes "GVE") — consistent across all versions so comparisons hold, but fix before v15 harness work.
+3. **Index profile calibration**: CTE/MRE/HPE produced <10 trades on all indices — filters need index-native calibration (or wait for v15 IRE's session-agnostic coverage). UK100 broker history gap (ends 15 May) is broker-side.
+4. **CTE-scoped RFE**: dedicated A/B experiment (do not adopt from the v14 aggregate subgroup).
+
 ### v13 promotions (config.py — untracked; recorded here per the config-is-never-committed rule)
 Added to `KIRA_ROUTING_TABLE`, `ENGINE_SYMBOL_WHITELIST`, and `PAIRS`/`JPY_PAIRS`:
 - **CBE × CADJPY** — matrix PF 3.40, OOS +RM298 (4/5 folds). Strongest.

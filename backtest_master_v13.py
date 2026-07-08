@@ -588,6 +588,20 @@ INDEX_PROFILES_V17 = {   # pip=1.0 index point; pip_val tick-derived; spread in 
     "DE40":   dict(pip=1.0, pip_val_rm=0.0454, spread_pts=4.0,  sl_cap=120),
 }
 
+# v18: LOWER-TIMEFRAME TRACK — run our timeframe-agnostic engines (IRE, CBE)
+# on lower TFs as SEPARATE engine labels (IRE15, CBE15) — ISOLATED and additive.
+# The current H1/H4 system is frozen: existing rows stay byte-identical when the
+# flag is off, LTF trades carry distinct labels, and promotion (if any) would be
+# new live methods, never edits to the originals. Spread is counted REALISTICALLY
+# (100x the FX profiles' x0.01 under-count) because at M15 spread is a large
+# fraction of edge — the make-or-break. M15-based; flag-gated preload/fetch.
+LTF_ENABLED = False
+LTF_SYMBOLS = SRE_SYMBOLS + CROSS_SYMBOLS   # 11 majors + 17 crosses (the proven FX universe)
+def _ltf_realistic_spread(sym):
+    """Realistic spread_rm = spread_pips x pip_val (GVE convention), i.e. 100x
+    the CTE profile's under-counted spread_pips x pip_val x 0.01."""
+    return CTE_PROFILES[sym]["spread_rm"] * 100.0
+
 # v14 task-7: RFE — Relative currency-strength veto, flag-gated (default OFF).
 # Pure logic lives in rfe_strength.py (reviewed in Task 6, consumed verbatim
 # here — never modified). When ON, every CTE/MRE/CBE/HPE signal is vetoed
@@ -658,8 +672,9 @@ for sym in ALL_SYMBOLS:
         m15=fetch(sym,TF_M15,m15_count)
         entry["M15"] = m15
     elif (SRE_ENABLED and sym in SRE_SYMBOLS) or (SCE_ENABLED and sym in SCE_SYMBOLS) \
-         or ((ORE_ENABLED or GAP_ENABLED) and sym in ORE_GAP_FX):
-        # v14/v15/v17: SRE/SCE/ORE/GAP scan M15; full history window.
+         or ((ORE_ENABLED or GAP_ENABLED) and sym in ORE_GAP_FX) \
+         or (LTF_ENABLED and sym in LTF_SYMBOLS):
+        # v14/v15/v17/v18: SRE/SCE/ORE/GAP/LTF scan M15; full history window.
         m15=fetch(sym,TF_M15,99999)
         entry["M15"] = m15
     else:
@@ -2786,6 +2801,100 @@ if ORE_ENABLED or GAP_ENABLED:
             print(f"\n  {_v17_engine} aggregate: {len(v17_all)} trades | net RM{sum(t['pnl_rm'] for t in v17_all):+.2f} | PF {_pf(v17_all)}")
             print(f"    INDEX: n={len(idx):4} net RM{sum(t['pnl_rm'] for t in idx):+9.2f} PF {_pf(idx)}")
             print(f"    FX   : n={len(fx):4} net RM{sum(t['pnl_rm'] for t in fx):+9.2f} PF {_pf(fx)}  (invariant: expect fail)")
+
+# ══════════════════════════════════════════════════════════
+#  v18: IRE15 — IRE on M15 (LOWER-TIMEFRAME TRACK, isolated)
+# ══════════════════════════════════════════════════════════
+# ire_logic verbatim on M15 bars. Distinct label "IRE15" (never "IRE") so the
+# H1 IRE rows/combos are untouched. Realistic spread. FX universe only.
+print(f"\n{SEP}")
+print("  RUNNING IRE15 (IRE on M15 — lower-TF track)")
+print(f"  {len(LTF_SYMBOLS)} FX symbols | M15 displacement->FVG->rebalance | realistic spread | flag={'ON' if LTF_ENABLED else 'OFF'}")
+print(SEP)
+if LTF_ENABLED:
+    from ire_logic import (IRE_DEFAULTS, detect_displacement, find_fvg,
+                           rebalance_entry, ire_levels)
+    IRE15_TIMEOUT_BARS = 96   # M15 bars (~24h)
+    ire15_all=[]
+    for sym in LTF_SYMBOLS:
+        if sym not in data or data[sym].get("M15") is None:
+            print(f"\n{sym}: SKIPPED — no M15"); continue
+        p=CTE_PROFILES[sym]
+        pip=p["pip"]; pv=p["pip_val_rm"]; min_fvg=p["min_fvg"]
+        spread_rm=_ltf_realistic_spread(sym)
+        sl_cap=40.0 if "JPY" in sym else 30.0
+        m15a=data[sym]["M15"].reset_index(drop=True)
+        h=m15a["high"]; l=m15a["low"]; pc=m15a["close"].shift(1)
+        atr_series=pd.concat([h-l,(h-pc).abs(),(l-pc).abs()],axis=1).max(axis=1).ewm(com=13,adjust=False).mean()
+        bars=[{k:float(v) for k,v in b.items()} for b in m15a[["open","high","low","close"]].to_dict("records")]
+        times=m15a["time"]
+        trades=[]; mo_pnl=defaultdict(float); busy_until=-1
+        print(f"\n{sym} (IRE15) — scanning {len(bars)} M15 candles...")
+        for i in range(IRE_DEFAULTS["structure_bars"], len(bars)-2):
+            if i<=busy_until: continue
+            atr=float(atr_series.iloc[i])
+            if atr<=0: continue
+            d=detect_displacement(bars,i,atr)
+            if d is None: continue
+            direction=d["direction"]
+            g=find_fvg(bars,i,direction,pip,min_fvg)
+            if g is None: continue
+            gap_lo,gap_hi=g
+            start=i+2
+            hit=rebalance_entry(bars[start:start+IRE_DEFAULTS["wait_bars"]],
+                                gap_lo,gap_hi,direction,d["origin"],IRE_DEFAULTS["wait_bars"])
+            if hit is None: continue
+            off,entry=hit; j=start+off
+            dt=times.iloc[j]; mo=dt.strftime("%Y-%m")
+            bal=500+sum(t["pnl_rm"] for t in trades)
+            if mo_pnl[mo]<=-(bal*MAX_MONTHLY_LOSS_PCT/100): continue
+            lvls=ire_levels(direction,entry,d["origin"],d["extreme"],pip,atr,sl_cap)
+            if lvls is None: continue
+            sl,tp,sl_pips,tp_pips,rr=lvls
+            sl_pips=round(sl_pips,1); tp_pips=round(tp_pips,1); rr=round(rr,2)
+            out="timeout"; pp=0.0; ei=j
+            for fi in range(j,min(j+IRE15_TIMEOUT_BARS+1,len(bars))):
+                fb=bars[fi]
+                if direction=="BUY":
+                    if fi>j and fb["low"]<=sl:  out="loss"; pp=-sl_pips; ei=fi; break
+                    if fb["high"]>=tp:          out="win";  pp=tp_pips;  ei=fi; break
+                else:
+                    if fi>j and fb["high"]>=sl: out="loss"; pp=-sl_pips; ei=fi; break
+                    if fb["low"]<=tp:           out="win";  pp=tp_pips;  ei=fi; break
+            if out=="timeout":
+                ei=min(j+IRE15_TIMEOUT_BARS,len(bars)-1)
+                lp=bars[ei]["close"]
+                pp=round((entry-lp)/pip if direction=="SELL" else (lp-entry)/pip,1)
+                out="win" if pp>0 else "loss" if pp<0 else "be"
+            busy_until=ei
+            h_utc=dt.hour
+            sess=("Asian" if h_utc<7 else "London" if h_utc<12 else "NY" if h_utc<20 else "Other")
+            current_balance=500+sum(x["pnl_rm"] for x in trades)
+            peak_balance=max([500]+[500+sum(x["pnl_rm"] for x in trades[:k]) for k in range(len(trades)+1)])
+            current_dd=max(0.0,((peak_balance-current_balance)/peak_balance)*100)
+            risk_pct,risk_mult=kira_dynamic_risk(engine="IRE15",regime="REBALANCE",symbol=sym,current_dd=current_dd)
+            pnl_rm=round((pp*pv-spread_rm)*risk_mult,2)
+            exit_dt=times.iloc[min(ei,len(bars)-1)]
+            hold_h=round((exit_dt-dt).total_seconds()/3600,1)
+            t={"symbol":sym,"engine":"IRE15","regime":"REBALANCE","direction":direction,
+               "grade":"B","entry_dt":str(dt.date()),"month":mo,"year":str(dt.year),
+               "dow":DAYS[dt.weekday()],"session":sess,"hold_hours":hold_h,
+               "sl_pips":sl_pips,"tp_pips":tp_pips,"rr":rr,"outcome":out,
+               "pnl_pips":pp,"pnl_rm":pnl_rm,"risk_pct":risk_pct,"risk_mult":risk_mult}
+            trades.append(t); mo_pnl[mo]+=pnl_rm
+        ALL_TRADES.extend(trades); ire15_all.extend(trades)
+        if trades:
+            w=[t for t in trades if t["outcome"]=="win"]; n=len(trades)
+            net=sum(t["pnl_rm"] for t in trades); nmo=len(set(t["month"] for t in trades))
+            print(f"  → {n} signals | WR {len(w)/n*100:.1f}% | Net RM{net:+.2f} | {n/max(nmo,1):.1f}/mo {'✅' if net>0 else '❌'}")
+        else:
+            print(f"  → 0 signals")
+    if ire15_all:
+        gg=sum(t["pnl_rm"] for t in ire15_all if t["pnl_rm"]>0)
+        ll=abs(sum(t["pnl_rm"] for t in ire15_all if t["pnl_rm"]<0))
+        print(f"\n  IRE15 aggregate: {len(ire15_all)} trades | net RM{sum(t['pnl_rm'] for t in ire15_all):+.2f} | PF {round(gg/ll,2) if ll else 99.0}")
+else:
+    print("  LTF_ENABLED=False — skipping (zero IRE15 rows expected this run)")
 
 # ══════════════════════════════════════════════════════════
 #  REPORT

@@ -2897,6 +2897,106 @@ else:
     print("  LTF_ENABLED=False — skipping (zero IRE15 rows expected this run)")
 
 # ══════════════════════════════════════════════════════════
+#  v18: CBE15 — CBE on lower TF (H1 compression -> M15 entry), isolated
+# ══════════════════════════════════════════════════════════
+# One TF down from CBE (H4->H1 compression, H1->M15 momentum+entry). Outer loop
+# stays at H1 for performance (compression detected per H1 bar via the existing
+# cbe_detect_compression); entry drills into M15. Distinct "CBE15" label — the
+# H4/H1 CBE rows/combos are untouched. Realistic spread. cbe_detect_compression's
+# own range<ATR gate replaces the D1/H4 regime classifier (avoids per-bar cost +
+# TF-tuning mismatch). FX universe.
+print(f"\n{SEP}")
+print("  RUNNING CBE15 (CBE on M15 — lower-TF track)")
+print(f"  {len(LTF_SYMBOLS)} FX symbols | H1 compression -> M15 momentum+entry | realistic spread | flag={'ON' if LTF_ENABLED else 'OFF'}")
+print(SEP)
+if LTF_ENABLED:
+    CBE15_COOLDOWN_H1 = 24      # 1 day between signals per symbol (vs CBE's 72)
+    CBE15_TIMEOUT_M15 = 96      # M15 bars (~24h)
+    cbe15_all=[]
+    for sym in LTF_SYMBOLS:
+        if sym not in data or data[sym].get("M15") is None:
+            print(f"\n{sym}: SKIPPED — no M15"); continue
+        p=CBE_PROFILES[sym]; pip=p["pip"]; pv=p["pip_val_rm"]; min_range=p["min_range"]
+        spread_rm=_ltf_realistic_spread(sym)
+        h1a=data[sym]["H1"]; m15a=data[sym]["M15"].reset_index(drop=True)
+        m15_times=m15a["time"]
+        trades=[]; last_idx=-CBE15_COOLDOWN_H1; mo_pnl=defaultdict(float)
+        print(f"\n{sym} (CBE15) — scanning {len(h1a)} H1 candles -> M15 entry...")
+        _lb=CBE_ATR_LOOKBACK+CBE_COMPRESS_LOOKBACK+10
+        for i in range(_lb, len(h1a)-1):
+            c=h1a.iloc[i]; dt=c["time"]
+            if dt.weekday()>=5 or dt.weekday()==4: continue
+            h_utc=dt.hour
+            if not (SESSION_START_UTC<=h_utc<SESSION_END_UTC): continue
+            if i-last_idx<CBE15_COOLDOWN_H1: continue
+            mo=dt.strftime("%Y-%m")
+            bal=500+sum(t["pnl_rm"] for t in trades)
+            if mo_pnl[mo]<=-(bal*MAX_MONTHLY_LOSS_PCT/100): continue
+            # compression on H1 (down from H4)
+            h1win=h1a.iloc[i-_lb:i+1]
+            direction,c_high,c_low,h1_atr=cbe_detect_compression(h1win,pip,min_range)
+            if direction is None: continue
+            # M15 momentum + entry: first strong M15 candle in the direction after dt
+            after_lo=int(m15_times.searchsorted(dt, side="right"))
+            entry=None; ent_idx=None
+            for k in range(after_lo, min(after_lo+8, len(m15a))):  # next ~2h of M15
+                mb=m15a.iloc[k]; tr=float(mb["high"]-mb["low"])
+                if tr<=0: continue
+                body=abs(float(mb["close"])-float(mb["open"]))/tr
+                ok=(direction=="BUY" and mb["close"]>mb["open"]) or \
+                   (direction=="SELL" and mb["close"]<mb["open"])
+                if ok and body>=CBE_H1_BODY_MIN:
+                    entry=round(float(mb["close"]),5); ent_idx=k; break
+            if entry is None: continue
+            lv=cbe_levels(direction,entry,c_high,c_low,pip)
+            if lv[0] is None: continue
+            sl,tp,sl_pips,tp_pips,rr=lv
+            # sim on M15 from the bar after entry
+            out="timeout"; pp=0.0; ei=ent_idx
+            for fi in range(ent_idx+1, min(ent_idx+1+CBE15_TIMEOUT_M15, len(m15a))):
+                fc=m15a.iloc[fi]
+                if direction=="BUY":
+                    if fc["low"]<=sl:  out="loss"; pp=-sl_pips; ei=fi; break
+                    if fc["high"]>=tp: out="win";  pp=tp_pips;  ei=fi; break
+                else:
+                    if fc["high"]>=sl: out="loss"; pp=-sl_pips; ei=fi; break
+                    if fc["low"]<=tp:  out="win";  pp=tp_pips;  ei=fi; break
+            if out=="timeout":
+                ei=min(ent_idx+CBE15_TIMEOUT_M15, len(m15a)-1)
+                lp=float(m15a.iloc[ei]["close"])
+                pp=round((entry-lp)/pip if direction=="SELL" else (lp-entry)/pip,1)
+                out="win" if pp>0 else "loss" if pp<0 else "be"
+            last_idx=i
+            ent_dt=m15a.iloc[ent_idx]["time"]
+            current_balance=500+sum(x["pnl_rm"] for x in trades)
+            peak_balance=max([500]+[500+sum(x["pnl_rm"] for x in trades[:k]) for k in range(len(trades)+1)])
+            current_dd=max(0.0,((peak_balance-current_balance)/peak_balance)*100)
+            risk_pct,risk_mult=kira_dynamic_risk(engine="CBE15",regime="COMPRESSING",symbol=sym,current_dd=current_dd)
+            pnl_rm=round((pp*pv-spread_rm)*risk_mult,2)
+            hold_h=round((m15a.iloc[min(ei,len(m15a)-1)]["time"]-ent_dt).total_seconds()/3600,1)
+            sess=("London_Open" if LONDON_KZ_START<=h_utc<LONDON_KZ_END
+                  else "NY_Open" if NY_KZ_START<=h_utc<NY_KZ_END else "Other")
+            t={"symbol":sym,"engine":"CBE15","regime":"COMPRESSING","direction":direction,
+               "grade":"B","entry_dt":str(ent_dt.date()),"month":mo,"year":str(ent_dt.year),
+               "dow":DAYS[ent_dt.weekday()],"session":sess,"hold_hours":hold_h,
+               "sl_pips":sl_pips,"tp_pips":tp_pips,"rr":rr,"outcome":out,
+               "pnl_pips":pp,"pnl_rm":pnl_rm,"risk_pct":risk_pct,"risk_mult":risk_mult}
+            trades.append(t); mo_pnl[mo]+=pnl_rm
+        ALL_TRADES.extend(trades); cbe15_all.extend(trades)
+        if trades:
+            w=[t for t in trades if t["outcome"]=="win"]; n=len(trades)
+            net=sum(t["pnl_rm"] for t in trades); nmo=len(set(t["month"] for t in trades))
+            print(f"  → {n} signals | WR {len(w)/n*100:.1f}% | Net RM{net:+.2f} | {n/max(nmo,1):.1f}/mo {'✅' if net>0 else '❌'}")
+        else:
+            print(f"  → 0 signals")
+    if cbe15_all:
+        gg=sum(t["pnl_rm"] for t in cbe15_all if t["pnl_rm"]>0)
+        ll=abs(sum(t["pnl_rm"] for t in cbe15_all if t["pnl_rm"]<0))
+        print(f"\n  CBE15 aggregate: {len(cbe15_all)} trades | net RM{sum(t['pnl_rm'] for t in cbe15_all):+.2f} | PF {round(gg/ll,2) if ll else 99.0}")
+else:
+    print("  LTF_ENABLED=False — skipping (zero CBE15 rows expected this run)")
+
+# ══════════════════════════════════════════════════════════
 #  REPORT
 # ══════════════════════════════════════════════════════════
 if not ALL_TRADES:

@@ -1611,6 +1611,147 @@ class AgentKIRA:
             return brief
         return None
 
+    # ════════════════════════════════════════════════════════════
+    #  v18 LOWER-TF TRACK — IRE15 / CBE15 (isolated, own methods)
+    #  Same validated logic on M15. The H4/H1 engines above are frozen.
+    # ════════════════════════════════════════════════════════════
+    def _engine_ire15(self, symbol, candles, tick, now_dt=None):
+        """IRE on M15 (v18). Identical to _engine_ire but reads M15 candles."""
+        m15 = candles.get("M15")
+        if m15 is None: return None
+        d = IRE_DEFAULTS
+        if len(m15) < d["structure_bars"] + d["wait_bars"] + 20: return None
+        pip     = get_pip(symbol)
+        pv      = get_pip_value_rm(symbol)
+        min_fvg = IRE_MIN_FVG_JPY if is_jpy(symbol) else MIN_FVG_PIPS_FOREX
+        sl_cap  = IRE_SL_CAP_JPY  if is_jpy(symbol) else IRE_SL_CAP_FOREX
+        mv = m15.tail(d["structure_bars"] + d["wait_bars"] + 40).reset_index(drop=True)
+        h_ = mv["high"]; l_ = mv["low"]; pc_ = mv["close"].shift(1)
+        tr_ = pd.concat([h_-l_,(h_-pc_).abs(),(l_-pc_).abs()],axis=1).max(axis=1)
+        atr_series = tr_.ewm(com=13, adjust=False).mean()
+        bars = [{k: float(v) for k, v in b.items()}
+                for b in mv[["open","high","low","close"]].to_dict("records")]
+        last = len(bars) - 1
+        lo = max(d["structure_bars"], last - (d["wait_bars"] + 2))
+        for i in range(last - 2, lo - 1, -1):
+            atr = float(atr_series.iloc[i])
+            if atr <= 0: continue
+            disp = detect_displacement(bars, i, atr)
+            if disp is None: continue
+            direction = disp["direction"]
+            g = find_fvg(bars, i, direction, pip, min_fvg)
+            if g is None: continue
+            gap_lo, gap_hi = g; mid = (gap_lo + gap_hi) / 2.0
+            start = i + 2
+            if last - start >= d["wait_bars"]: continue
+            consumed = invalid = False
+            for b in bars[start:last]:
+                if direction == "BUY":
+                    if b["low"]  <= disp["origin"]: invalid  = True; break
+                    if b["low"]  <= mid:            consumed = True; break
+                else:
+                    if b["high"] >= disp["origin"]: invalid  = True; break
+                    if b["high"] >= mid:            consumed = True; break
+            if invalid or consumed: continue
+            fb = bars[last]
+            if direction == "BUY":
+                if fb["low"]  <= disp["origin"]: continue
+                if fb["low"]  >  mid:            continue
+            else:
+                if fb["high"] >= disp["origin"]: continue
+                if fb["high"] <  mid:            continue
+            entry = round(float(mv.iloc[-1]["close"]), 5)
+            lvls = ire_levels(direction, entry, disp["origin"], disp["extreme"], pip, atr, sl_cap)
+            if lvls is None: continue
+            sl, tp, sl_pips, tp_pips, rr = lvls
+            sl = round(sl, 5); tp = round(tp, 5)
+            sl_pips = round(sl_pips, 1); tp_pips = round(tp_pips, 1); rr = round(rr, 2)
+            grade = "B"; lot = get_lot(symbol)
+            brief = {
+                "agent": "KIRA", "engine": "IRE15", "regime": "REBALANCE",
+                "symbol": symbol, "direction": direction, "grade": grade,
+                "confidence": IRE_BASE_CONFIDENCE, "kira_score": IRE_BASE_CONFIDENCE,
+                "entry": entry, "sl": sl, "tp": tp,
+                "sl_pips": sl_pips, "tp_pips": tp_pips, "lot_size": lot,
+                "risk_rm": round(sl_pips*pv*lot/0.01,2), "profit_rm": round(tp_pips*pv*lot/0.01,2),
+                "rr": rr, "spread": tick["spread"],
+                "instrument_type": "jpy" if is_jpy(symbol) else "forex",
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            }
+            logger.info(f"KIRA IRE15 [REBALANCE]: {direction} {symbol} Grade-{grade} "
+                        f"SL:{sl_pips}pip TP:{tp_pips}pip R:R 1:{rr}")
+            return brief
+        return None
+
+    def _engine_cbe15(self, symbol, candles, tick, now_dt=None):
+        """CBE on lower TF (v18): H1 compression -> M15 momentum + entry.
+        Mirrors _engine_cbe one timeframe down. H4/H1 CBE untouched."""
+        h1 = candles.get("H1"); m15 = candles.get("M15")
+        if h1 is None or m15 is None: return None
+        pip       = get_pip(symbol)
+        min_range = CBE_MIN_RANGE_JPY if is_jpy(symbol) else CBE_MIN_RANGE_FOREX
+        pv        = get_pip_value_rm(symbol)
+        now = now_dt if now_dt is not None else datetime.now(tz=timezone.utc)
+        if now.weekday() >= 5 or now.weekday() == 4: return None
+        if not (SESSION_START_UTC <= now.hour < SESSION_END_UTC): return None
+        # compression on H1 (down from H4)
+        lb  = CBE_COMPRESS_LOOKBACK
+        h1v = h1.tail(CBE_ATR_LOOKBACK + lb + 10)
+        if len(h1v) < lb + 5: return None
+        h_ = h1v["high"]; l_ = h1v["low"]; pc_ = h1v["close"].shift(1)
+        tr_ = pd.concat([h_-l_,(h_-pc_).abs(),(l_-pc_).abs()],axis=1).max(axis=1)
+        h1_atr = float(tr_.ewm(com=CBE_ATR_LOOKBACK-1,adjust=False).mean().iloc[-1])
+        if h1_atr == 0: return None
+        h1_atr_p = h1_atr / pip
+        prior = h1v.iloc[-(lb+1):-1]
+        c_high = round(float(prior["high"].max()), 5); c_low = round(float(prior["low"].min()), 5)
+        c_range = (c_high - c_low) / pip
+        if c_range < min_range or c_range >= h1_atr_p * CBE_COMPRESS_ATR_RATIO: return None
+        cur = float(h1v.iloc[-1]["close"])
+        if   cur > c_high: direction = "BUY"
+        elif cur < c_low:  direction = "SELL"
+        else: return None
+        # momentum on M15 (down from H1)
+        m15v = m15.tail(CBE_H1_LOOKBACK + 3); best = 0.0
+        for k in range(len(m15v)-1, -1, -1):
+            c = m15v.iloc[k]; tr = float(c["high"] - c["low"])
+            if tr == 0: continue
+            body = abs(float(c["close"]) - float(c["open"])) / tr
+            ok = (direction=="BUY" and c["close"]>c["open"]) or (direction=="SELL" and c["close"]<c["open"])
+            if ok and body > best: best = body
+        if best < CBE_H1_BODY_MIN: return None
+        # entry on M15 close, levels via the CBE convention
+        entry = round(float(m15.iloc[-1]["close"]), 5)
+        c_rng_pips = (c_high - c_low) / pip
+        if direction == "BUY":
+            sl = round(c_high - (c_high-c_low)*CBE_SL_INSIDE_PCT, 5); sl_pips = round((entry-sl)/pip,1)
+            tp_pips = round(c_rng_pips*CBE_TP_RANGE_MULT,1); tp = round(entry+pip*tp_pips,5)
+        else:
+            sl = round(c_low + (c_high-c_low)*CBE_SL_INSIDE_PCT, 5); sl_pips = round((sl-entry)/pip,1)
+            tp_pips = round(c_rng_pips*CBE_TP_RANGE_MULT,1); tp = round(entry-pip*tp_pips,5)
+        if sl_pips <= 0 or tp_pips <= 0: return None
+        rr = round(tp_pips/sl_pips,2)
+        if rr < CBE_MIN_RR: return None
+        if rr > CBE_MAX_RR:
+            tp_pips = round(sl_pips*CBE_MAX_RR,1)
+            tp = round(entry+pip*tp_pips,5) if direction=="BUY" else round(entry-pip*tp_pips,5); rr = CBE_MAX_RR
+        grade = "B"; lot = get_lot(symbol)
+        brief = {
+            "agent": "KIRA", "engine": "CBE15", "regime": "COMPRESSING",
+            "symbol": symbol, "direction": direction, "grade": grade,
+            "confidence": CBE_BASE_CONFIDENCE, "kira_score": CBE_BASE_CONFIDENCE,
+            "entry": entry, "sl": sl, "tp": tp,
+            "sl_pips": sl_pips, "tp_pips": tp_pips, "lot_size": lot,
+            "risk_rm": round(sl_pips*pv*lot/0.01,2), "profit_rm": round(tp_pips*pv*lot/0.01,2),
+            "rr": rr, "spread": tick["spread"],
+            "c_high": c_high, "c_low": c_low, "body_ratio": round(best,3),
+            "instrument_type": "jpy" if is_jpy(symbol) else "forex",
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        logger.info(f"KIRA CBE15 [COMPRESSING]: {direction} {symbol} Grade-{grade} "
+                    f"body={best:.2f} SL:{sl_pips}pip TP:{tp_pips}pip R:R 1:{rr}")
+        return brief
+
         # ════════════════════════════════════════════════════════════
     #  MAIN PIPELINE — KIRA as dispatcher
     #
@@ -1698,6 +1839,10 @@ class AgentKIRA:
             return self._engine_hpe(symbol, candles, tick, regime, now_dt=now_dt)
         elif engine_name == "IRE":
             return self._engine_ire(symbol, candles, tick, now_dt=now_dt)
+        elif engine_name == "IRE15":
+            return self._engine_ire15(symbol, candles, tick, now_dt=now_dt)
+        elif engine_name == "CBE15":
+            return self._engine_cbe15(symbol, candles, tick, now_dt=now_dt)
         else:
             logger.warning(f"Unknown engine name: {engine_name}")
             return None

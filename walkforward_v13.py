@@ -44,6 +44,15 @@ CANDIDATE_COMBOS = [
     ("EURGBP", "IRE"),
     ("EURUSD", "IRE"),
     ("AUDUSD", "IRE"),
+    # v18: IRE15 (lower-TF) matrix-PASS combos
+    ("AUDUSD", "IRE15"),
+    ("USDJPY", "IRE15"),
+    ("EURCHF", "IRE15"),
+    # v18: CBE15 (lower-TF) matrix-PASS combos
+    ("EURUSD", "CBE15"),
+    ("USDCAD", "CBE15"),
+    ("USDJPY", "CBE15"),
+    ("NZDJPY", "CBE15"),
     # v16: FX-cross matrix-PASS combos (docs/reports/v13_matrix_2026-07-08.md)
     ("AUDCAD", "CBE"), ("AUDCHF", "CBE"), ("CADCHF", "CBE"), ("EURCAD", "CBE"),
     ("GBPAUD", "CBE"), ("GBPCAD", "CBE"), ("NZDCHF", "CBE"),

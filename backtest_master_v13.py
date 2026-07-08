@@ -559,6 +559,35 @@ SRE_SYMBOLS = ["AUDUSD","EURUSD","GBPUSD","NZDUSD","USDCAD","USDCHF",
 SCE_ENABLED = False
 SCE_SYMBOLS = SRE_SYMBOLS
 
+# v17: ORE + GAP — index-native engines, flag-gated (default OFF). Both use
+# M15 (opening range = first 2 M15 bars = 30 min; gap = D1-close vs session
+# open). ORE_GAP_INDICES need their own D1+M15 fetch (not in ALL_SYMBOLS).
+# ORE_GAP_FX = the 11 majors, run for the CROSS-TEST INVARIANT (index engines
+# must be shown to fail on FX, not assumed to). pip_val_rm IRON-RULE derived
+# from live MT5 tick data (8 Jul probe). Spread conservative (~2x the tight-
+# session probe reading, in index points).
+ORE_ENABLED = False
+GAP_ENABLED = False
+# v17 probe finding (8 Jul): these index CFDs have NO detectable cash-open in
+# volume/range — tick activity tracks the broker's clients (US afternoon peak
+# 16-17h UTC), not home-market opens; AUS200 has zero data at its own open.
+# So auto-detection is impossible: use FIXED known cash-open times (UTC, DST
+# slop accepted) and let the matrix judge. AUS200 dropped (no data at open).
+ORE_GAP_INDICES = ["US500", "US30", "USTEC", "DE40"]
+ORE_GAP_FX = SRE_SYMBOLS   # cross-test invariant (expected: FX fails)
+ORE_GAP_SYMBOLS = ORE_GAP_INDICES + ORE_GAP_FX
+ORE_GAP_OPEN_UTC = {   # minutes-into-UTC-day of the cash open (fixed)
+    "US500": 810, "US30": 810, "USTEC": 810,   # 13:30 UTC (US EDT open)
+    "DE40":  420,                               # 07:00 UTC (DAX open)
+}
+ORE_GAP_FX_OPEN = 480   # 08:00 UTC London open, for the FX invariant test
+INDEX_PROFILES_V17 = {   # pip=1.0 index point; pip_val tick-derived; spread in points
+    "US500":  dict(pip=1.0, pip_val_rm=0.0398, spread_pts=1.0,  sl_cap=40),
+    "US30":   dict(pip=1.0, pip_val_rm=0.0398, spread_pts=2.5,  sl_cap=150),
+    "USTEC":  dict(pip=1.0, pip_val_rm=0.0398, spread_pts=2.0,  sl_cap=200),
+    "DE40":   dict(pip=1.0, pip_val_rm=0.0454, spread_pts=4.0,  sl_cap=120),
+}
+
 # v14 task-7: RFE — Relative currency-strength veto, flag-gated (default OFF).
 # Pure logic lives in rfe_strength.py (reviewed in Task 6, consumed verbatim
 # here — never modified). When ON, every CTE/MRE/CBE/HPE signal is vetoed
@@ -628,9 +657,9 @@ for sym in ALL_SYMBOLS:
         m15_count = 99999
         m15=fetch(sym,TF_M15,m15_count)
         entry["M15"] = m15
-    elif (SRE_ENABLED and sym in SRE_SYMBOLS) or (SCE_ENABLED and sym in SCE_SYMBOLS):
-        # v14 task-5 / v15 task-5: SRE+SCE scan M15 bar-by-bar like GVE;
-        # full history window.
+    elif (SRE_ENABLED and sym in SRE_SYMBOLS) or (SCE_ENABLED and sym in SCE_SYMBOLS) \
+         or ((ORE_ENABLED or GAP_ENABLED) and sym in ORE_GAP_FX):
+        # v14/v15/v17: SRE/SCE/ORE/GAP scan M15; full history window.
         m15=fetch(sym,TF_M15,99999)
         entry["M15"] = m15
     else:
@@ -642,6 +671,21 @@ for sym in ALL_SYMBOLS:
               f"{h1['time'].iloc[0].date()} → {h1['time'].iloc[-1].date()}")
     else:
         print(f"  {sym}: ⚠️ MISSING DATA")
+
+# v17: dedicated D1+M15 fetch for the ORE/GAP index candidates (not in
+# ALL_SYMBOLS — they have no FX-engine profile). Runs before mt5.shutdown().
+if ORE_ENABLED or GAP_ENABLED:
+    print("\nv17: fetching ORE/GAP index data...")
+    for sym in ORE_GAP_INDICES:
+        if sym in data:
+            continue
+        d1=fetch(sym,TF_D1,1200); m15=fetch(sym,TF_M15,99999)
+        if d1 is not None and m15 is not None:
+            data[sym] = {"D1":d1,"H4":None,"H1":None,"W1":None,"M15":m15}
+            print(f"  {sym}: {len(d1)}×D1 {len(m15)}×M15 | "
+                  f"{m15['time'].iloc[0].date()} → {m15['time'].iloc[-1].date()}")
+        else:
+            print(f"  {sym}: ⚠️ MISSING DATA (skipped)")
 
 # ── Classifier ────────────────────────────────────────────
 class _Dummy:
@@ -2557,6 +2601,191 @@ if SCE_ENABLED:
                       f"net RM{sum(t['pnl_rm'] for t in sub):+9.2f} PF {_sce_pf(sub)}")
 else:
     print("  SCE_ENABLED=False — skipping (zero SCE rows expected this run)")
+
+# ══════════════════════════════════════════════════════════
+#  v17: ORE + GAP — INDEX-NATIVE ENGINES (flag-gated)
+# ══════════════════════════════════════════════════════════
+# ORE (opening-range breakout) + GAP (overnight gap-and-go). Both M15-based,
+# one trade per symbol per day, engine-private state. Run on the 5 index
+# candidates AND the 11 FX majors (cross-test invariant — index engines must
+# be SHOWN to fail on FX, not assumed to). Uses pre-fetched data[sym]["M15"]/
+# ["D1"] (MT5 already shut down). Session open detected empirically per symbol.
+def _ore_gap_profile(sym):
+    """Returns (pip, pip_val_rm, spread_rm, sl_cap_pips). Index spread uses the
+    REALISTIC GVE-style convention (spread_pts x pip_val — NOT the FX profiles'
+    legacy x0.01 under-count), because index-spread survival is the whole
+    v17 question. FX cross-test symbols keep their legacy profile spread."""
+    if sym in INDEX_PROFILES_V17:
+        p = INDEX_PROFILES_V17[sym]
+        return 1.0, p["pip_val_rm"], p["spread_pts"]*p["pip_val_rm"], p["sl_cap"]
+    p = CTE_PROFILES[sym]
+    return p["pip"], p["pip_val_rm"], p["spread_rm"], (80 if "JPY" in sym else 60)
+
+def detect_session_open_minute(m15):
+    """Empirical cash-open: time-of-day (minutes into UTC day) where mean M15
+    range surges most vs the slot 15 min earlier. Data-derived => DST-robust."""
+    tod = (m15["time"].dt.hour*60 + m15["time"].dt.minute).values
+    rng = (m15["high"] - m15["low"]).values
+    slots = sorted(set(int(s) for s in tod))
+    mean_r = {}
+    for s in slots:
+        mean_r[s] = float(rng[tod == s].mean())
+    best, bestjump = slots[0], -1e18
+    for s in slots:
+        jump = mean_r[s] - mean_r.get((s-15) % 1440, 0.0)
+        if jump > bestjump:
+            bestjump, best = jump, s
+    return best
+
+def _m15_atr_series_v17(m15, period=14):
+    h=m15["high"]; l=m15["low"]; pc=m15["close"].shift(1)
+    tr=pd.concat([h-l,(h-pc).abs(),(l-pc).abs()],axis=1).max(axis=1)
+    return tr.ewm(com=period-1,adjust=False).mean()
+
+if ORE_ENABLED or GAP_ENABLED:
+    from ore_logic import ORE_DEFAULTS, opening_range, classify_or_breakout, ore_levels
+    from gap_logic import GAP_DEFAULTS, gap_size_atr, classify_gap_go, gap_levels
+
+    ORE_SESSION_HOURS = 4      # only trade the first 4h after the open
+    ORE_TIMEOUT_BARS  = 24     # M15 bars from entry -> exit at close (6h)
+
+    for _v17_engine, _v17_on in (("ORE", ORE_ENABLED), ("GAP", GAP_ENABLED)):
+        print(f"\n{SEP}")
+        print(f"  RUNNING {_v17_engine} ({'Opening Range' if _v17_engine=='ORE' else 'Overnight Gap'} Engine)")
+        print(f"  {len(ORE_GAP_SYMBOLS)} symbols (5 index + 11 FX invariant) | flag={'ON' if _v17_on else 'OFF'}")
+        print(SEP)
+        if not _v17_on:
+            print(f"  {_v17_engine}_ENABLED=False — skipping"); continue
+
+        v17_all=[]
+        for sym in ORE_GAP_SYMBOLS:
+            if sym not in data or data[sym].get("M15") is None:
+                print(f"\n{sym}: SKIPPED — no M15"); continue
+            pip, pv, spread_rm, sl_cap = _ore_gap_profile(sym)
+            m15 = data[sym]["M15"].reset_index(drop=True)
+            d1  = data[sym].get("D1")
+            atr_series = _m15_atr_series_v17(m15)
+            open_min = ORE_GAP_OPEN_UTC.get(sym, ORE_GAP_FX_OPEN)   # fixed cash open (v17 finding)
+            tod = (m15["time"].dt.hour*60 + m15["time"].dt.minute)
+            dates = m15["time"].dt.date
+            udates = dates.drop_duplicates().tolist()
+            # D1 close-by-date for GAP (prior session close)
+            d1_close_by_date={}
+            if d1 is not None:
+                for _,r in d1.iterrows():
+                    d1_close_by_date[r["time"].date()] = float(r["close"])
+            d1_atr = None
+            if d1 is not None and len(d1)>14:
+                h_=d1["high"]; l_=d1["low"]; pc_=d1["close"].shift(1)
+                tr_=pd.concat([h_-l_,(h_-pc_).abs(),(l_-pc_).abs()],axis=1).max(axis=1)
+                d1_atr = float(tr_.ewm(com=13,adjust=False).mean().iloc[-1])
+
+            trades=[]; mo_pnl=defaultdict(float)
+            print(f"\n{sym} ({_v17_engine}) — open≈{open_min//60:02d}:{open_min%60:02d} UTC, {len(m15)} M15 bars...")
+
+            for cur in udates:
+                if cur.weekday()>=5: continue
+                day_mask = (dates==cur).values
+                day_idx = [i for i in range(len(m15)) if day_mask[i]]
+                if not day_idx: continue
+                # bars at/after the detected open, within the session
+                open_idx = [i for i in day_idx if tod.iloc[i]>=open_min]
+                if len(open_idx)<3: continue
+                sess_end_min = open_min + ORE_SESSION_HOURS*60
+
+                direction=None; entry=None; sl=tp=None; sl_pips=tp_pips=rr=0.0; ent_i=None
+                atr = float(atr_series.iloc[open_idx[0]])
+                if atr<=0: continue
+
+                if _v17_engine=="ORE":
+                    win = [i for i in open_idx if tod.iloc[i]<open_min+30]  # first 30 min
+                    if len(win)<1: continue
+                    wb=[{"high":float(m15.iloc[i]["high"]),"low":float(m15.iloc[i]["low"])} for i in win]
+                    orr = opening_range(wb, atr)
+                    if orr is None: continue
+                    or_hi,or_lo=orr
+                    min_break=ORE_DEFAULTS["min_break_atr"]*atr/pip
+                    for i in open_idx:
+                        if tod.iloc[i]<open_min+30: continue       # after OR window
+                        if tod.iloc[i]>=sess_end_min: break        # opening edge only
+                        b={"open":float(m15.iloc[i]["open"]),"high":float(m15.iloc[i]["high"]),
+                           "low":float(m15.iloc[i]["low"]),"close":float(m15.iloc[i]["close"])}
+                        br=classify_or_breakout(b,or_hi,or_lo,pip,min_break,ORE_DEFAULTS["min_body"])
+                        if br is None: continue
+                        direction="BUY" if br=="BREAK_UP" else "SELL"
+                        entry=round(b["close"],5); ent_i=i
+                        lv=ore_levels(direction,entry,or_hi,or_lo,pip,atr,sl_cap)
+                        if lv is None: direction=None; continue
+                        sl,tp,sl_pips,tp_pips,rr=lv; break
+                else:  # GAP
+                    if d1_atr is None or d1_atr<=0: continue
+                    prior_dates=[dd for dd in d1_close_by_date if dd<cur]
+                    if not prior_dates: continue
+                    prior_close=d1_close_by_date[max(prior_dates)]
+                    op_i=open_idx[0]; open_price=float(m15.iloc[op_i]["open"])
+                    fb_i=open_idx[0]
+                    fb={"open":float(m15.iloc[fb_i]["open"]),"high":float(m15.iloc[fb_i]["high"]),
+                        "low":float(m15.iloc[fb_i]["low"]),"close":float(m15.iloc[fb_i]["close"])}
+                    go=classify_gap_go(prior_close,open_price,fb,d1_atr,
+                                       GAP_DEFAULTS["min_gap_atr"],GAP_DEFAULTS["min_body"])
+                    if go is None: continue
+                    direction="BUY" if go=="GAP_UP_GO" else "SELL"
+                    entry=round(fb["close"],5); ent_i=fb_i
+                    gap_price=abs(open_price-prior_close)
+                    lv=gap_levels(direction,entry,open_price,gap_price,pip,atr,sl_cap)
+                    if lv is None: continue
+                    sl,tp,sl_pips,tp_pips,rr=lv
+
+                if direction is None or entry is None: continue
+                sl_pips=round(sl_pips,1); tp_pips=round(tp_pips,1); rr=round(rr,2)
+                dt=m15.iloc[ent_i]["time"]; mo=dt.strftime("%Y-%m")
+                bal=500+sum(t["pnl_rm"] for t in trades)
+                if mo_pnl[mo]<=-(bal*MAX_MONTHLY_LOSS_PCT/100): continue
+
+                # sim: M15 from bar after entry; SL-first; timeout N bars -> close
+                out="timeout"; pp=0.0; ei=ent_i
+                for fi in range(ent_i+1, min(ent_i+1+ORE_TIMEOUT_BARS,len(m15))):
+                    fc=m15.iloc[fi]
+                    if direction=="BUY":
+                        if fc["low"]<=sl:  out="loss"; pp=-sl_pips; ei=fi; break
+                        if fc["high"]>=tp: out="win";  pp=tp_pips;  ei=fi; break
+                    else:
+                        if fc["high"]>=sl: out="loss"; pp=-sl_pips; ei=fi; break
+                        if fc["low"]<=tp:  out="win";  pp=tp_pips;  ei=fi; break
+                if out=="timeout":
+                    ei=min(ent_i+ORE_TIMEOUT_BARS,len(m15)-1)
+                    lp=float(m15.iloc[ei]["close"])
+                    pp=round((entry-lp)/pip if direction=="SELL" else (lp-entry)/pip,1)
+                    out="win" if pp>0 else "loss" if pp<0 else "be"
+
+                pnl_rm=round(pp*pv-spread_rm,2)
+                exit_dt=m15.iloc[min(ei,len(m15)-1)]["time"]
+                hold_h=round((exit_dt-dt).total_seconds()/3600,1)
+                mkt="Index" if sym in INDEX_PROFILES_V17 else "FX"
+                t={"symbol":sym,"engine":_v17_engine,"regime":"BREAKOUT" if _v17_engine=="ORE" else "GAP",
+                   "direction":direction,"grade":"B","entry_dt":str(dt.date()),"month":mo,"year":str(dt.year),
+                   "dow":DAYS[dt.weekday()],"session":mkt,"hold_hours":hold_h,
+                   "sl_pips":sl_pips,"tp_pips":tp_pips,"rr":rr,"outcome":out,
+                   "pnl_pips":pp,"pnl_rm":pnl_rm,"risk_pct":1.0,"risk_mult":1.0}
+                trades.append(t); mo_pnl[mo]+=pnl_rm
+
+            ALL_TRADES.extend(trades); v17_all.extend(trades)
+            if trades:
+                w=[t for t in trades if t["outcome"]=="win"]; n=len(trades)
+                net=sum(t["pnl_rm"] for t in trades); nmo=len(set(t["month"] for t in trades))
+                print(f"  → {n} signals | WR {len(w)/n*100:.1f}% | Net RM{net:+.2f} | {n/max(nmo,1):.1f}/mo "
+                      f"{'✅' if net>0 else '❌'}")
+            else:
+                print(f"  → 0 signals")
+        # index vs FX split (cross-test invariant made a number)
+        if v17_all:
+            def _pf(ts):
+                g=sum(t["pnl_rm"] for t in ts if t["pnl_rm"]>0); l=abs(sum(t["pnl_rm"] for t in ts if t["pnl_rm"]<0))
+                return round(g/l,2) if l else 99.0
+            idx=[t for t in v17_all if t["symbol"] in INDEX_PROFILES_V17]; fx=[t for t in v17_all if t["symbol"] not in INDEX_PROFILES_V17]
+            print(f"\n  {_v17_engine} aggregate: {len(v17_all)} trades | net RM{sum(t['pnl_rm'] for t in v17_all):+.2f} | PF {_pf(v17_all)}")
+            print(f"    INDEX: n={len(idx):4} net RM{sum(t['pnl_rm'] for t in idx):+9.2f} PF {_pf(idx)}")
+            print(f"    FX   : n={len(fx):4} net RM{sum(t['pnl_rm'] for t in fx):+9.2f} PF {_pf(fx)}  (invariant: expect fail)")
 
 # ══════════════════════════════════════════════════════════
 #  REPORT

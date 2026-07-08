@@ -15,6 +15,51 @@ class MT5Connector:
 
     def __init__(self):
         self.connected = False
+        # SIM virtual-position engine (SIM_MODE only). Real orders get a broker
+        # ticket and the broker holds them to SL/TP; SIM must simulate that
+        # itself — previously it didn't (every SIM trade closed BE next cycle).
+        self._sim_positions = {}   # ticket -> position dict
+        self._sim_closed    = {}   # ticket -> realized pnl_usd (consumed once)
+        self._sim_ticket    = 500000
+
+    def _sim_pnl_usd(self, pos, exit_price):
+        """Realized/unrealized USD P&L for a SIM position at exit_price."""
+        pip = get_pip(pos["symbol"])
+        pnl_pips = (exit_price - pos["entry"]) / pip * (1 if pos["direction"] == "BUY" else -1)
+        usd_per_pip = get_pip_value_rm(pos["symbol"]) / USD_MYR_RATE * (pos["lots"] / 0.01)
+        return round(pnl_pips * usd_per_pip, 2)
+
+    def _sim_open_positions(self):
+        """Check each SIM position against SL/TP with the live tick. Realize
+        (move to _sim_closed, remove from open) when a level is hit so
+        _detect_closed picks it up with the correct pnl; otherwise return it as
+        an open position with updated price for MAE/MFE tracking."""
+        result = []
+        for ticket, pos in list(self._sim_positions.items()):
+            tick = self.get_tick(pos["symbol"])
+            if not tick:
+                continue
+            cur = tick["bid"] if pos["direction"] == "BUY" else tick["ask"]
+            hit = None
+            if pos["direction"] == "BUY":
+                if   cur <= pos["sl"]: hit = pos["sl"]
+                elif cur >= pos["tp"]: hit = pos["tp"]
+            else:
+                if   cur >= pos["sl"]: hit = pos["sl"]
+                elif cur <= pos["tp"]: hit = pos["tp"]
+            if hit is not None:
+                self._sim_closed[ticket] = self._sim_pnl_usd(pos, hit)
+                del self._sim_positions[ticket]
+                continue
+            pip = get_pip(pos["symbol"])
+            result.append({
+                "ticket": ticket, "symbol": pos["symbol"], "direction": pos["direction"],
+                "lots": pos["lots"], "entry": pos["entry"], "current": cur,
+                "sl": pos["sl"], "tp": pos["tp"], "profit": self._sim_pnl_usd(pos, cur),
+                "pnl_pips": round((cur - pos["entry"]) / pip * (1 if pos["direction"] == "BUY" else -1), 1),
+                "magic": 20260525,
+            })
+        return result
 
     def connect(self):
         if not mt5.initialize():
@@ -138,9 +183,15 @@ class MT5Connector:
         if SIM_MODE:
             tick  = self.get_tick(symbol)
             price = tick["ask"] if direction == "BUY" else tick["bid"]
+            self._sim_ticket += 1
+            ticket = self._sim_ticket
+            self._sim_positions[ticket] = {
+                "ticket": ticket, "symbol": symbol, "direction": direction,
+                "entry": price, "sl": sl, "tp": tp, "lots": lot_size,
+            }
             logger.info(f"SIM ORDER: {direction} {symbol} @ {price} "
-                        f"SL:{sl} TP:{tp} lots:{lot_size}")
-            return {"ticket": 99999, "price": price}
+                        f"SL:{sl} TP:{tp} lots:{lot_size} #{ticket}")
+            return {"ticket": ticket, "price": price}
 
         self._ensure_symbol(symbol)
         tick  = self.get_tick(symbol)
@@ -195,6 +246,8 @@ class MT5Connector:
         return {"ticket": result.order, "price": result.price}
 
     def get_open_positions(self):
+        if SIM_MODE:
+            return self._sim_open_positions()
         positions = mt5.positions_get()
         if positions is None: return []
         result = []
@@ -231,6 +284,13 @@ class MT5Connector:
         return result and result.retcode == mt5.TRADE_RETCODE_DONE
 
     def close_position(self, ticket):
+        if SIM_MODE:
+            pos = self._sim_positions.pop(ticket, None)
+            if pos is None: return False
+            tick = self.get_tick(pos["symbol"])
+            cur  = (tick["bid"] if pos["direction"] == "BUY" else tick["ask"]) if tick else pos["entry"]
+            self._sim_closed[ticket] = self._sim_pnl_usd(pos, cur)
+            return True
         positions = mt5.positions_get(ticket=ticket)
         if not positions: return False
         pos        = positions[0]
@@ -259,6 +319,8 @@ class MT5Connector:
         return result and result.retcode == mt5.TRADE_RETCODE_DONE
 
     def get_closed_pnl(self, ticket):
+        if SIM_MODE:
+            return self._sim_closed.pop(ticket, 0.0)
         try:
             from datetime import datetime, timezone, timedelta
             now   = datetime.now(tz=timezone.utc)
